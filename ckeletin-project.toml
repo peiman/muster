@@ -49,7 +49,10 @@ cli = ["crates/cli"]
 
 [allowlists]
 # serde: required — typed serialization for domain result types (CKSPEC-ARCH-004)
-domain = ["serde"]
+# thiserror: typed domain validation errors (invalid slug, duplicate id, not-found,
+#   bad enum, missing reference, ambiguous pass/fail) without hand-rolling
+#   std::error::Error. Manifesto #8 — errors are domain knowledge.
+domain = ["serde", "thiserror"]
 # ckeletin: required — framework crate re-export (CKSPEC-ARCH-005)
 infrastructure = ["ckeletin"]
 

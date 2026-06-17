@@ -331,9 +331,11 @@ dependencies = [
  "domain",
  "infrastructure",
  "predicates",
+ "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -423,6 +425,7 @@ dependencies = [
  "bolero",
  "serde",
  "serde_json",
+ "thiserror",
  "trybuild",
 ]
 
