@@ -1,282 +1,169 @@
-# muster — SPEC (values brief)
+# muster — SPEC v1 (the glue engine)
 
 > *پندارِ نیک، گفتارِ نیک، کردارِ نیک* — good thoughts, good words, good deeds.
 > *Skynda långsamt.*
 
-**muster** is a minimalistic, AI-first command-line **ledningssystem** (management
-system) for **startups and midsize companies with no compliance department**. It
-lets them run their management system as a living **process map**, become
-**ISO-certification-ready** without consultants, and handle **incidents / command
-& control** — from one small, honest tool, usable by AI agents and humans alike.
+**muster** is a minimalistic, AI-first command-line **ledningssystem** for startups
+and midsize companies: it runs their management system as a living process map,
+makes them ISO-certification-ready without a compliance department, and handles
+incidents / command & control — usable by AI agents and humans alike (AX-first).
 
-The name carries the thesis: *muster* the team and resources (incident C2) **and**
-*pass muster* (meet the standard). Two jobs, one spine.
+## v0 is BUILT — this SPEC specifies the v1 evolution
 
-## The core idea — a process is a hypothesis
+v0 already exists in this repo (do NOT regress it; `just check` must stay green):
+the **Process** spine (recursive graph, cycle detection), **Control / Incident /
+Nonconformity / Evidence**, the hypothesis lifecycle (`proposed → active →
+under_review → retired`, derived `proven`), append-only `revise --because`
+feedback, the enforcement-ladder `check` seam, the dual-surface CLI
+(`--output json` mirrors all fields), `explain`, and the `readiness` gap meter.
+Keep all of it.
 
-This tool is the management-system expression of Manifesto principle #10
-(Feedback Cycle): **"A specification is a hypothesis; implementations test it. When
-better approaches emerge, the specification evolves."**
+## Why v1 — the glue thesis, made true
 
-A process in muster is **not true because someone wrote it down.** It is a
-*hypothesis* about how work should be done. Reality tests it — through evidence
-(#1 Truth-Seeking), through failures that are signals not just defects
-(#2 Curiosity Over Certainty), and through automated conformance checks
-(#9 Automated Enforcement). When reality refutes or outgrows a process, **the
-process changes**, and that change is recorded. Later, CI and automation systems
-will drive muster to *really follow* the processes (the seam for that is built in
-v0; the CI plugin itself is later — #5 Platforms, Not Features).
+A dogfood of v0 against the real **ckeletin** project (one spec, CKSPEC, with Go +
+Rust implementations) found the load-bearing flaw: **v0 is a *recorder* — it stores
+copies of truth that lives elsewhere, and lets an operator hand-set a status the
+underlying tool would reject.** It could show a control green while `just check`
+is red — violating muster's own honesty principle.
 
-So muster is not a static compliance recorder. It is a **living, falsifiable,
-evidence-driven** process system: the scientific method as a ledningssystem.
+**muster must be GLUE, not a second ledger** (Peiman's principle; Manifesto #7
+Single Source of Truth — *"reference the source rather than copying it"*; #8
+Separation of Concerns). It must **point at the existing ways a team already works
+and not break them** — referencing and *resolving* the authoritative sources, never
+copying or replacing them. ckeletin already owns conformance (`just check`,
+`conform`, `conformance-mapping.toml`); muster's job is the cross-cutting,
+spec-as-hypothesis **glue** that points at those sources and tells one honest
+story — value that no single repo has, added without touching any repo's tooling.
 
-## Who it is for
+So v1's core is one inversion: **stored truth → truth resolved on read from the
+pointed-at source.**
 
-Startups and midsize companies with **no dedicated compliance team**. They must
-become certifiable (ISO 9001 / 14001 / 27001, etc.) and manage incidents, but
-cannot afford ceremony or consultants. muster works on day one with zero config
-and **guides** the user toward readiness rather than demanding it.
+## The v1 model shift (the core work)
 
-## Principles (these define the product; each is bound to the Manifesto)
+### `Ref` — a resolvable reference (domain)
+A new domain type: a typed pointer to an authoritative source. v1 resolver kinds
+(keep minimal — these two cover ckeletin):
+- **`file_anchor { path, anchor }`** — read a value from a TOML/JSON file at an
+  anchor (e.g. `conformance-mapping.toml#requirements.CKSPEC-ARCH-001.title`, or a
+  per-requirement status from a derived `conformance-report.json`). This is the
+  PRIMARY glue: point at the *result artifact the source tool already produces*,
+  don't re-run it.
+- **`command { cmd, dir }`** — run a command in a dir; exit 0 = pass, non-zero =
+  fail. For sources with no result artifact. (Use sparingly — prefer reading an
+  artifact over re-running an expensive check.)
 
-1. **AX-first, but humans too.** Every command serves an AI agent driving it *and*
-   a human reading it — two renderings of one truth, not two modes of thought.
-2. **Dual surface, one source of truth (#7 SSOT).** Every command supports
-   `--output json` whose fields mirror **all** the data structurally — never a
-   human-only string, never markdown stuffed in a JSON blob. The default rendering
-   is clean human-readable text. Text and JSON tell the *same* story.
-3. **Minimal ceremony (#4 Lean Iteration).** `muster init` and you are working. No
-   mandatory config; the only required fields are identity + a description.
-   Sensible defaults. A founder gets value in five minutes.
-4. **Guide, do not gate (#2).** muster never blocks you for being incomplete.
-   `readiness` *illuminates* gaps (a process with no risks, a control with no
-   evidence, an open nonconformity, an honor-system-only process). It nags toward
-   certification; it never stands in the way of moving fast.
-5. **Honest signals (#3 Good Will — build anchors).** Exit codes are truthful.
-   `readiness` never paints green over an unmet standard, and distinguishes
-   **proven** from merely **asserted**. Errors name what is wrong *and the fix*.
-6. **Hand the next action.** After a command, muster suggests the natural next step
-   — serving a cold agent and a new founder identically.
-7. **Self-describing.** `muster explain` gives an intent-first map; every command
-   has clear `--help`. No manual required.
-8. **Standard-agnostic.** muster hard-codes no standard. You define the controls
-   you must meet (any framework); muster manages them. Importing a named control
-   set is a later feature, not a v0 dependency.
+(`note` = opaque/manual stays available but is always surfaced as *asserted*.
+A `url` kind is explicitly out of scope for v1 — no network.)
 
-## Foundation
+### Resolution (the dereference engine)
+- **domain** defines the pure types only: `Ref`, and a `Resolved` result —
+  `Resolved { value, resolved_ts, source_excerpt? }` or `Unresolved { reason }`.
+  Domain stays I/O-free (ckeletin enforces domain purity — only `serde`; do NOT
+  read files or run commands in `crates/domain`).
+- **infrastructure** implements the resolver: dereference a `Ref` (read the file +
+  extract the anchor; or run the command) → `Resolved`/`Unresolved`. All file/proc
+  I/O lives here (respect the layer boundaries + declare any new dep in
+  `ckeletin-project.toml` allowlists with a justification comment).
+- **cli** wires resolution into `show`/`readiness` and renders both surfaces.
 
-Scaffold from the **ckeletin-rust** framework at `/Users/peiman/dev/ckeletin-rust`
-(the same framework workhorse consumes): layered `crates/{domain,infrastructure,
-cli}`, the `.ckeletin/` conformance harness, `ckeletin-project.toml`, `just`
-recipes. Keep `just check` green. Rust; no network, no database, no async runtime.
+### Controls and Checks become reference-backed
+- `Control` and `Check` gain an **optional `ref: Ref`**.
+- **When `ref` is present:** `title`, `status`, and (for checks) `last_result` are
+  **DERIVED by resolving the ref on read** — not hand-set. The stored title (if
+  any) is a fallback display label, never the authority. Add explicit states:
+  **`Unresolved`** (pointer can't be followed — dangling/missing) and **`Stale`**
+  (resolved, but the cached resolution is older than a freshness bound or the
+  source changed). Cache the last resolution for display; mark it honestly.
+- **When `ref` is absent:** the v0 hand-set path still works, but is surfaced as
+  **`asserted (unverified)`** — never as proven.
+- **The honesty rule (closes the Principle-5 hole):** a reference-backed control
+  can NEVER show implemented/green when its resolved source says fail/red. Derived
+  status always reflects the source.
 
-## Data model — Process is the spine
+Backward-compatible: every v0 command keeps working; `ref` is additive
+(skip-serialized when absent, so existing stores load unchanged).
 
-All entities are **JSON files** under a per-project data dir (git-diffable, no
-database). `muster init` creates the store.
+### `readiness` becomes a true truth-meter
+- Distinguish **derived** (resolved from source at `<ts>`) from **asserted**
+  (hand-set, unverified) — extend the existing proven/asserted split.
+- Flag **unresolved / stale / dangling** refs as gap findings (not silent green).
+- For evidence, **verify the target exists** (file on disk / anchor present), not
+  just that a record is present.
+- The honest top-line verdict already never reads green over gaps — extend it to
+  count unresolved/stale refs as gaps.
 
-### Process (the spine; a node in a directed graph; a hypothesis)
-```
-id            slug, unique                              required
-name                                                    required
-purpose                                                 optional
-owner         role or person                            optional
-status        proposed | active | under_review | retired   default: proposed
-inputs[]      strings                                   optional
-outputs[]     strings                                   optional
-steps[]       Step objects (below)                      optional
-controls[]    control ids governing the whole process   optional
-risks[]       strings        (readiness flags if empty on an active process)
-metrics[]     strings        (readiness flags if empty on an active process)
-checks[]      Check objects (below) — conformance signals, the CI seam
-revisions[]   Revision objects (below) — the feedback cycle, append-only
-evidence[]    Evidence refs                             optional
-```
-`status` is the **hypothesis lifecycle**: `proposed` (a hypothesis, unproven) →
-`active` (in use) → `under_review` (reality is diverging) → `retired`. muster also
-derives a **`proven`** signal = has validating evidence **and** no open
-nonconformities/failed checks against it. `readiness` reports proven-vs-asserted.
+## Prioritized scope
 
-**Step** (an ordered activity; recursion point):
-```
-n             integer order              required
-description                              required
-owner                                    optional
-controls[]    control ids at this step   optional
-process_ref   id of a sub-process        optional   ← processes compose recursively
-```
-A step with `process_ref` delegates to another process → the process map is a
-graph. **Cycles are possible; muster detects them and reports them as a finding**
-(never loops forever).
+- **P0 — Resolvable `Ref` + dereference engine** (`file_anchor` + `command`), the
+  domain/infra/cli split above. The missing organ.
+- **P0 — Derived control/check status** from resolving the ref, with
+  `Unresolved`/`Stale` states and the asserted escape hatch marked unverified.
+- **P0 — Title as a resolved projection** (stored title becomes a fallback).
+- **P1 — Reference-import from a source manifest:** one command to ingest many
+  controls/checks as *references* (not copies) from a TOML/JSON requirements file,
+  so the control set is tied to the source. (Validates against ckeletin's
+  `conformance-mapping.toml`.)
+- **P1 — Staleness / dangling-reference detection in `readiness`** (verify targets
+  exist; record resolution timestamps; surface stale results).
+- **P1 — N:M control ↔ implementation:** one requirement satisfied by many
+  implementations, each with its own *derived* status (CKSPEC-ARCH-001 met by both
+  ckeletin-rust AND ckeletin-go), instead of duplicated or coupled state.
+- **P2 — Revision propagation:** a `revise --because <signal>` flags the
+  controls/processes that reference the revised source so they can be re-evaluated.
 
-**Check** (a conformance signal — #9 Automated Enforcement; the CI seam):
-```
-id            slug                                       required
-description                                             required
-enforcement   compile_time | lint | script | ci | honor    required
-last_result   pass | fail | unknown      default: unknown
-last_run_ts                              set on ingest
-evidence[]    Evidence refs             optional
-```
-`enforcement` encodes the #9 ladder. An `honor`-only check is the weakest form of
-enforcement; `readiness` flags it as a gap to strengthen. Results are ingested via
-`muster process check` (v0 = manual/scripted ingest; a CI plugin calls the same
-seam later).
+## AX / dual-surface conventions (unchanged, non-negotiable)
+Every command accepts `--output json` mirroring all fields (no human-only data, no
+markdown in JSON); honest exit codes; not-found/invalid errors name the fix;
+`explain` maps intents → commands; deterministic ordering. New derived/resolution
+fields appear in JSON structurally (`resolved`, `resolved_ts`, `source`, and the
+`asserted|derived|unresolved|stale` distinction).
 
-**Revision** (the feedback cycle made auditable — #10):
-```
-ts                                       set on write
-summary       what changed and why       required
-because       optional id of the incident/nonconformity/check that triggered it
-```
+## Definition of Done — the validator grades this (and we re-dogfood after)
 
-### Control (standard-agnostic requirement)
-```
-id            slug, unique               required
-title                                     required
-clause_ref    free text (e.g. "ISO 27001 A.5.24")   optional
-applicable    bool                        default: true
-status        not_started | in_progress | implemented   default: not_started
-evidence[]    Evidence refs              optional
-```
+Built on the existing muster code; **`just check` green; every v0 capability still
+works (no regression)**. Then, end-to-end and verifiable by a cold agent via
+`--output json`:
 
-### Incident (occurs within a process; a refuting signal)
-```
-id            slug, unique               required
-title                                     required
-severity      low | medium | high | critical   default: medium
-status        open | mitigating | closed  default: open
-process_ref   id of the process it occurred in   optional
-log[]         timeline entries {ts, note}, appended via `incident log`
-```
+1. A control with `ref: file_anchor` pointing at a TOML/JSON file derives its
+   `title` from that file on read; **edit the source value and muster reflects the
+   change** on the next read (not stale-forever).
+2. A check with `ref: file_anchor` pointing at a result artifact (or `command`)
+   derives `pass`/`fail` from the source; **muster cannot mark it pass when the
+   source says fail** — demonstrate the attempt is impossible/ignored (the
+   Principle-5 honesty hole is closed).
+3. A dangling/missing ref resolves to **`Unresolved`** and shows in `readiness` as
+   a gap, never a silent green; a stale resolution shows as **`Stale`**.
+4. `readiness --output json` distinguishes **derived** vs **asserted** controls and
+   counts unresolved/stale as gaps in the honest verdict.
+5. **Reference-import (P1):** import a set of controls as references from a
+   TOML/JSON requirements file in one command; the imported controls are tied to
+   the source (re-resolvable), not transcribed copies.
+6. **N:M (P1):** one requirement linked to two implementation processes, each
+   carrying its own derived status.
+7. **The ckeletin acceptance (read-only on ckeletin):** point a control at
+   `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml#<a real CKSPEC id>`
+   and a check at that repo's derived conformance result (or `just check`); muster
+   **derives** the status from the real source and **refuses to show green when the
+   source is red** — proving muster now points-at-and-resolves rather than copies.
 
-### Nonconformity (a finding against a process/control; a refuting signal)
-```
-id            slug, unique               required
-source        incident | audit | manual   required
-process_ref   id                          optional
-control_ref   id                          optional
-description                               required
-corrective_action  free text             optional
-status        open | in_progress | closed   default: open
-```
-Can be raised from an incident (`--from-incident <id>`), copying its process_ref.
-
-### Evidence
-A reference attached to a process / control / nonconformity / check:
-`{ kind: file | url | note, value }`.
-
-## Command surface (all dual-surface: human text by default, `--output json` mirrors all fields)
-
-```
-muster init
-muster explain
-
-muster process add <id> --name … [--owner … --purpose …]
-muster process show <id> [--tree]
-muster process list
-muster process set-status <id> <proposed|active|under_review|retired>
-muster process step add <id> --description … [--control … --owner … --process-ref …]
-muster process link-control <id> <control-id>
-muster process risk add <id> "<risk>"
-muster process metric add <id> "<metric>"
-muster process check add <id> --description … --enforcement <compile_time|lint|script|ci|honor>
-muster process check <id> <check-id> --pass|--fail [--evidence <kind> <value>]   # ingest a conformance result
-muster process revise <id> "<what changed>" [--because <incident|nonconformity|check id>]
-muster process attach-evidence <id> <kind> <value>
-
-muster control add <id> --title … [--clause-ref … --applicable true|false]
-muster control list | show <id> | set-status <id> <status> | attach-evidence <id> <kind> <value>
-
-muster incident report <id> --title … [--severity … --process <pid>]
-muster incident list | show <id> | log <id> "<note>" | close <id>
-
-muster nonconformity raise <id> --description … [--from-incident <iid> | --process <pid> | --control <cid>] [--source …]
-muster nonconformity list | show <id> | resolve <id> [--corrective-action "…"]
-
-muster readiness [--process <id>]
-```
-
-## `muster readiness` — the headline value (a truth meter, not a checklist)
-
-Computes certification-readiness over the process graph, in text and JSON. Reports
-at minimum:
-- **Control coverage**: of applicable controls (process- + step-level, rolled up
-  across the graph), how many are `implemented` *with at least one evidence* — a %
-  and the gap list.
-- **Proven vs. asserted**: which active processes are *proven* (validating
-  evidence, no open refuting signals) vs. merely asserted.
-- **Refuting signals**: processes carrying open incidents/nonconformities, or a
-  failed last check — "hypothesis under threat, review it" (#2, #10).
-- **Enforcement strength**: per process, the strongest enforcement among its
-  checks; honor-only processes flagged as a gap to strengthen (#9 ladder).
-- **Gap findings** (guide-don't-gate): active processes with no risks / no metrics
-  / no controls; controls implemented but evidence-less; nonconformities with no
-  corrective action; **process-graph cycles**.
-- A single honest top-line verdict (e.g. `READY` / `GAPS: N`) that never reads
-  green while gaps exist.
-
-`--process <id>` scopes to one process and its sub-graph.
-
-## AX / dual-surface conventions (non-negotiable acceptance criteria)
-
-- Every command accepts `--output json`; the JSON contains every field the text
-  shows (and more), as structured data — **no** human-only fields, **no** markdown
-  or pre-rendered tables inside JSON.
-- Exit codes are honest: `0` only on success; non-zero with a clear stderr message
-  naming the fix.
-- Not-found / invalid-input errors name the offending id/field **and** the
-  corrective command.
-- `muster explain` maps intents → commands.
-- Output is deterministic (stable ordering) so agents can diff and assert.
-
-## Definition of done — the validator grades this end-to-end
-
-A reviewer with **no prior knowledge of muster**, using only `--help`/`explain`
-and `--output json`, drives the full spine and observes truthful results:
-
-1. `muster init`; `process add incident-mgmt --name "Incident Management" --owner
-   ciso` → succeeds (status defaults to `proposed`); `process show … --output json`
-   returns the structured process.
-2. Create `containment`; add a step to `incident-mgmt` delegating to it
-   (`--process-ref containment`); `process show incident-mgmt --tree` expands it.
-3. `control add a5-24 --title "Incident planning" --clause-ref "ISO 27001 A.5.24"`;
-   `process link-control incident-mgmt a5-24`; `control set-status a5-24
-   implemented` + attach evidence.
-4. `process check add incident-mgmt --description "runbook exists in CI" \
-   --enforcement ci`; `process check incident-mgmt <check> --pass` → recorded.
-5. `incident report inc-1 --title … --process incident-mgmt`; `incident log inc-1
-   "contained"`.
-6. `nonconformity raise nc-1 --from-incident inc-1 --description …`; then
-   `process revise incident-mgmt "tightened detection step" --because nc-1`
-   (the feedback cycle); `nonconformity resolve nc-1 --corrective-action …`.
-7. `process set-status incident-mgmt active`; `readiness --output json` reflects
-   all the above truthfully: control coverage %, proven-vs-asserted, zero open
-   nonconformities after resolve, enforcement strength (the `ci` check), the
-   remaining gap findings, and an honest top-line verdict. Re-running after a
-   change moves the numbers correctly.
-8. Introduce a process cycle and confirm `readiness` reports it rather than
-   hanging.
-9. Every command behaves identically in JSON and human modes (same facts), and
-   `just check` is green.
-
-## Out of scope for v0 (do NOT build)
-
-No embedded LLM / AI provider (muster is *driven by* agents; it does not call one).
-No network, database, web UI, auth/multi-tenant. No actual CI plugin (only the
-conformance-ingest *seam*). No import of named standard control sets. No
-PDF/report export. Minimalism is a feature, not a compromise.
+## Out of scope for v1 (do NOT build)
+No embedded LLM. No UI. No network (no `url` ref kind yet). No re-implementation of
+ckeletin's conformance engine — muster POINTS AT it, never reproduces it. No
+multi-tenant/auth. Keep it minimal: the win is honesty (resolve-don't-copy), not
+features.
 
 ---
 
 ## How to build this — the Manifesto (every phase: read and apply it)
 
-This project is built by autonomous agents (planner, critic, executor, reviewer,
-validator). **Every phase must read and develop by Peiman's Manifesto**
-(github.com/peiman/manifesto). It is not decoration — the validator grades
-manifesto-alignment (e.g., is a process honestly *proven-vs-asserted*? are
-enforcement strengths recorded per #9? is the feedback cycle a first-class,
-auditable artifact per #10?), not just feature presence.
+Built by autonomous agents (planner, critic, executor, reviewer, validator).
+**Every phase must read and develop by Peiman's Manifesto**
+(github.com/peiman/manifesto). The validator grades manifesto-alignment — above
+all, **#7 (reference the source, don't copy it)** and **#10 (a spec is a
+hypothesis; implementations test it; it evolves)** — not just feature presence.
+This very SPEC is v1 *because* v0's hypothesis was refuted by a real dogfood (#2:
+failures are signals; #4: reality is the spec). Keep muster honest about its own
+glue thesis.
 
 The ten principles, verbatim:
 
