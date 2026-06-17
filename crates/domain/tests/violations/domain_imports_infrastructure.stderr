@@ -1,0 +1,15 @@
+error[E0433]: cannot find module or crate `infrastructure` in this scope
+ --> tests/violations/domain_imports_infrastructure.rs:5:5
+  |
+5 | use infrastructure::output::Output;
+  |     ^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `infrastructure`
+  |
+  = help: if you wanted to use a crate named `infrastructure`, use `cargo add infrastructure` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `infrastructure` in this scope
+ --> tests/violations/domain_imports_infrastructure.rs:8:25
+  |
+8 |     let _ = Output::new(infrastructure::output::OutputMode::Human);
+  |                         ^^^^^^^^^^^^^^ use of unresolved module or unlinked crate `infrastructure`
+  |
+  = help: if you wanted to use a crate named `infrastructure`, use `cargo add infrastructure` to add it to your `Cargo.toml`

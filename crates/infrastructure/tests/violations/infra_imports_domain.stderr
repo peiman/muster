@@ -1,0 +1,7 @@
+error[E0433]: cannot find module or crate `domain` in this scope
+ --> tests/violations/infra_imports_domain.rs:5:5
+  |
+5 | use domain::ping::PingResult;
+  |     ^^^^^^ use of unresolved module or unlinked crate `domain`
+  |
+  = help: if you wanted to use a crate named `domain`, use `cargo add domain` to add it to your `Cargo.toml`

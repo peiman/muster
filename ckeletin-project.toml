@@ -1,0 +1,63 @@
+# ckeletin-project.toml — project-owned conformance configuration
+#
+# This file is YOURS. It survives `just ckeletin-update` (it lives outside
+# .ckeletin/ which is replaced wholesale on every update).
+#
+# This is the ONLY place to tailor conformance for your project:
+#   - Rename layer crates from the scaffold defaults
+#   - Extend allowlists when your domain legitimately needs more deps
+#   - Opt out of violation tests if your layout doesn't carry them
+#
+# Do NOT edit .ckeletin/crate/tests/arch_allowlist.rs or
+# .ckeletin/crate/tests/violation_drift_guard.rs — those are framework-owned
+# and replaced on every update.
+
+# ── Layer crate paths ─────────────────────────────────────────────────────────
+#
+# List the paths of your layer crates relative to the workspace root.
+# Multiple domain or infrastructure crates are supported (list form).
+#
+# Example (custom layout):
+#   [layers]
+#   domain = ["chat-core", "chat-models"]
+#   infrastructure = ["chat-infra"]
+#   cli = ["chat-cli"]
+
+[layers]
+domain = ["crates/domain"]
+infrastructure = ["crates/infrastructure"]
+cli = ["crates/cli"]
+
+# ── Dependency allowlists ─────────────────────────────────────────────────────
+#
+# Complete list of allowed [dependencies] for each layer crate.
+# Adding ANY new dep requires adding it here — which is the point.
+# Add a comment above each entry justifying why it belongs there.
+#
+# Example (workhorse shape — 8 justified domain deps):
+#   [allowlists]
+#   # serde: typed serialization for domain result types (CKSPEC-ARCH-004)
+#   # serde_json: JSON serialization for API responses
+#   # serde_yaml: YAML config deserialization
+#   # indexmap: ordered map for stable output
+#   # regex: pattern matching in domain rules
+#   # chrono: timestamp types in domain events
+#   # thiserror: typed error definitions
+#   # sha2: content hashing for deduplication
+#   domain = ["serde", "serde_json", "serde_yaml", "indexmap", "regex", "chrono", "thiserror", "sha2"]
+#   infrastructure = ["ckeletin"]
+
+[allowlists]
+# serde: required — typed serialization for domain result types (CKSPEC-ARCH-004)
+domain = ["serde"]
+# ckeletin: required — framework crate re-export (CKSPEC-ARCH-005)
+infrastructure = ["ckeletin"]
+
+# ── Violation tests ───────────────────────────────────────────────────────────
+#
+# Controls the violation drift guard (vendored vs project copies of trybuild
+# test files).  Set enabled = false with a comment if your layout doesn't
+# carry violation test copies.
+
+[violation_tests]
+enabled = true

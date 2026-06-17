@@ -1,0 +1,24 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "muster"
+path = "src/main.rs"
+
+# CLI crate: the ONLY crate that depends on both domain and infrastructure.
+# This is where directed dependencies converge (CKSPEC-ARCH-002).
+[dependencies]
+domain = { path = "../domain" }
+infrastructure = { path = "../infrastructure" }
+clap = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"

@@ -1,0 +1,7 @@
+error[E0432]: unresolved import `clap`
+ --> tests/violations/infra_imports_clap.rs:5:5
+  |
+5 | use clap::Parser;
+  |     ^^^^ use of unresolved module or unlinked crate `clap`
+  |
+  = help: if you wanted to use a crate named `clap`, use `cargo add clap` to add it to your `Cargo.toml`

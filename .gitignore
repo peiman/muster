@@ -1,0 +1,15 @@
+/target
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Audit logs (CKSPEC-OUT-004 — written to ~/.config/<app>/logs/ by default;
+# this rule prevents locally-generated logs/ directories under crates/ from
+# being accidentally committed if a developer overrides the path to a relative dir)
+logs/
+crates/*/logs/
+
+# Generated SBOM artifacts (just ckeletin-sbom) — produced on demand / in CI
+*.cdx.json
+sbom.cdx.json

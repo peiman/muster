@@ -1,0 +1,26 @@
+[package]
+name = "infrastructure"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# ENFORCEMENT: No dependency on domain or cli.
+# This Cargo.toml IS the enforcement mechanism for:
+#   CKSPEC-ARCH-005 (Infrastructure independence)
+#   CKSPEC-ARCH-002 (Directed dependencies — infra cannot reach up)
+# Violation tests verify this (CKSPEC-ENF-006).
+
+[lints.clippy]
+# OUT-005: Infrastructure MUST NOT write to stdout or stderr — all output through Output.
+# This lint fires at `cargo clippy` time, making the enforcement level "linter".
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+ckeletin = { path = "../../.ckeletin/crate" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rstest = { workspace = true }
+trybuild = { workspace = true }

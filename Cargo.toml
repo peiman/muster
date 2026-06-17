@@ -1,0 +1,49 @@
+[workspace]
+members = ["crates/*", ".ckeletin/crate", ".ckeletin/conform"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV — kept in lockstep with rust-toolchain.toml's pinned channel so the
+# minimum supported Rust is machine-declared, not just implied by CI.
+rust-version = "1.96"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/peiman/muster"
+
+# Profile used by `cargo bolero` (just ckeletin-fuzz). Required by bolero for
+# active fuzz runs; unused by normal builds/tests.
+[profile.fuzz]
+inherits = "release"
+debug = true
+
+[workspace.dependencies]
+# Serialization — cross-cutting concern permitted in domain (CKSPEC-ARCH-004 notes)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI framework — ONLY in cli crate (CKSPEC-ARCH-003)
+clap = { version = "4", features = ["derive", "env", "string"] }
+
+# Configuration — infrastructure concern (CKSPEC-ARCH-003 notes)
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Logging — infrastructure concern
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+
+# Error handling
+thiserror = "2"
+
+# Terminal styling
+
+# Dev dependencies
+assert_cmd = "2"
+predicates = "3"
+rstest = "0.26"
+tempfile = "3"
+trybuild = "1"
+# Fuzzing — runs on STABLE Rust with --sanitizer NONE; corpus replays as
+# ordinary `cargo test` (a deterministic regression guard). See `just ckeletin-fuzz`.
+bolero = "0.13"

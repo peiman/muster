@@ -1,0 +1,31 @@
+[package]
+name = "domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# ENFORCEMENT: Only serde. No clap, no figment, no tracing, no infrastructure.
+# This Cargo.toml IS the enforcement mechanism for:
+#   CKSPEC-ARCH-003 (CLI framework isolation)
+#   CKSPEC-ARCH-004 (Business logic isolation)
+#   CKSPEC-ARCH-005 (Infrastructure independence — reverse direction)
+# If domain code tries `use clap::Parser` → compile error.
+# Violation tests in crates/domain/tests/ verify this (CKSPEC-ENF-006).
+
+[lints.clippy]
+# OUT-005: Domain MUST NOT write to stdout or stderr — all output through Output.
+# This lint fires at `cargo clippy` time, making the enforcement level "linter".
+# Verified: adding `println!("x")` to domain code fails `just ckeletin-clippy`.
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+trybuild = { workspace = true }
+# Test-only fuzzing harness (bolero). A dev-dependency, so it does NOT relax the
+# runtime "only serde" boundary above — domain code still cannot use it.
+bolero = { workspace = true }
