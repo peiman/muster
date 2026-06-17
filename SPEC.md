@@ -1,169 +1,146 @@
-# muster — SPEC v1 (the glue engine)
+# muster — SPEC v2 (honest glue: no stale green, safe path is the default)
 
 > *پندارِ نیک، گفتارِ نیک، کردارِ نیک* — good thoughts, good words, good deeds.
 > *Skynda långsamt.*
 
 **muster** is a minimalistic, AI-first command-line **ledningssystem** for startups
-and midsize companies: it runs their management system as a living process map,
-makes them ISO-certification-ready without a compliance department, and handles
-incidents / command & control — usable by AI agents and humans alike (AX-first).
+and midsize companies — agent-drivable, dual-surface (human + `--output json`),
+and **glue**: it points at the existing ways a team works and resolves truth from
+them, never copying or replacing them.
 
-## v0 is BUILT — this SPEC specifies the v1 evolution
+## v0 + v1 are BUILT — this SPEC specifies the v2 hardening
 
-v0 already exists in this repo (do NOT regress it; `just check` must stay green):
-the **Process** spine (recursive graph, cycle detection), **Control / Incident /
-Nonconformity / Evidence**, the hypothesis lifecycle (`proposed → active →
-under_review → retired`, derived `proven`), append-only `revise --because`
-feedback, the enforcement-ladder `check` seam, the dual-surface CLI
-(`--output json` mirrors all fields), `explain`, and the `readiness` gap meter.
-Keep all of it.
+Do NOT regress v0/v1; `just check` must stay green; every existing command keeps
+working. Already built:
+- **v0:** the Process spine (recursive graph, cycle detection), Control / Incident
+  / Nonconformity / Evidence, hypothesis lifecycle, `revise --because` feedback,
+  the enforcement-ladder `check` seam, dual-surface CLI, `readiness`.
+- **v1 (the glue engine):** resolvable `Ref` (`file_anchor` + `command` + `note`),
+  status/title **derived on read** by resolving the ref, the four honest states
+  (**Derived / Stale / Unresolved / Asserted**), `import` (controls as references
+  from a TOML/JSON manifest), N:M control↔implementation, dangling-ref detection.
+  The honesty rule is enforced at the projection layer (`own_blocks`): a ref-backed
+  control cannot show green when its resolved source is Fail/Unresolved/Stale.
 
-## Why v1 — the glue thesis, made true
+A re-dogfood against the real **ckeletin** project confirmed v1 **earns its place**
+(5 of 6 v0 findings fixed; resolve-on-read proven; can no longer "lie green").
 
-A dogfood of v0 against the real **ckeletin** project (one spec, CKSPEC, with Go +
-Rust implementations) found the load-bearing flaw: **v0 is a *recorder* — it stores
-copies of truth that lives elsewhere, and lets an operator hand-set a status the
-underlying tool would reject.** It could show a control green while `just check`
-is red — violating muster's own honesty principle.
+## Why v2 — the honesty is real but still BOUNDED
 
-**muster must be GLUE, not a second ledger** (Peiman's principle; Manifesto #7
-Single Source of Truth — *"reference the source rather than copying it"*; #8
-Separation of Concerns). It must **point at the existing ways a team already works
-and not break them** — referencing and *resolving* the authoritative sources, never
-copying or replacing them. ckeletin already owns conformance (`just check`,
-`conform`, `conformance-mapping.toml`); muster's job is the cross-cutting,
-spec-as-hypothesis **glue** that points at those sources and tells one honest
-story — value that no single repo has, added without touching any repo's tooling.
+The re-dogfood found one load-bearing residual: **muster's honesty is only as
+strong as the ref kind the operator happens to pick.**
 
-So v1's core is one inversion: **stored truth → truth resolved on read from the
-pointed-at source.**
+- A **`command` ref serves a CACHED result for up to a full day** (default
+  freshness `MUSTER_FRESHNESS_SECS = 86_400`) without re-running. Reproduced live:
+  a command passed, the guarded file was deleted (world went red), and the control
+  **still showed green**. That is exactly the `just check`-style honesty gap the v0
+  critique centered on — re-opened by the cache.
+- **Nothing steers operators to the zero-drift path.** The safe option
+  (`file_anchor` pointed at the result artifact the source tool already produces)
+  is harder to reach than the drift-prone `--ref-cmd`; the "use sparingly" note
+  never appears in CLI help.
+- **`file_anchor` is staleness-blind to its source artifact** — it derives a
+  true-looking `met` even from a `conformance-report.json` nobody regenerated.
+- Anchors are stored unvalidated; a source refactor silently → `Unresolved`.
 
-## The v1 model shift (the core work)
+v2's thesis (Manifesto #9 — Automated Enforcement over advice): **a stale signal
+must never show green, regardless of ref kind, and the safe path must be the
+default/easy path — enforced structurally, not documented.**
 
-### `Ref` — a resolvable reference (domain)
-A new domain type: a typed pointer to an authoritative source. v1 resolver kinds
-(keep minimal — these two cover ckeletin):
-- **`file_anchor { path, anchor }`** — read a value from a TOML/JSON file at an
-  anchor (e.g. `conformance-mapping.toml#requirements.CKSPEC-ARCH-001.title`, or a
-  per-requirement status from a derived `conformance-report.json`). This is the
-  PRIMARY glue: point at the *result artifact the source tool already produces*,
-  don't re-run it.
-- **`command { cmd, dir }`** — run a command in a dir; exit 0 = pass, non-zero =
-  fail. For sources with no result artifact. (Use sparingly — prefer reading an
-  artifact over re-running an expensive check.)
+## v2 scope (prioritized from the re-dogfood)
 
-(`note` = opaque/manual stays available but is always surfaced as *asserted*.
-A `url` kind is explicitly out of scope for v1 — no network.)
+### P0 — Close the command-ref drift window
+A `command` ref must **never display green from a result older than its freshness
+bound**. Implement EITHER:
+- re-resolve command refs **live on read** (like `file_anchor`) by default; or
+- keep an opt-in cache but make the **default freshness small**, and a
+  past-freshness command result projects to **`Stale`** (which is **not**
+  green-eligible — already true in the model; make sure it actually fires).
 
-### Resolution (the dereference engine)
-- **domain** defines the pure types only: `Ref`, and a `Resolved` result —
-  `Resolved { value, resolved_ts, source_excerpt? }` or `Unresolved { reason }`.
-  Domain stays I/O-free (ckeletin enforces domain purity — only `serde`; do NOT
-  read files or run commands in `crates/domain`).
-- **infrastructure** implements the resolver: dereference a `Ref` (read the file +
-  extract the anchor; or run the command) → `Resolved`/`Unresolved`. All file/proc
-  I/O lives here (respect the layer boundaries + declare any new dep in
-  `ckeletin-project.toml` allowlists with a justification comment).
-- **cli** wires resolution into `show`/`readiness` and renders both surfaces.
+Regardless of mechanism: **always surface the resolved age** ("served-from-cache,
+age=Xs" / a `resolved_age_secs` + `served_from_cache` field) in BOTH human and JSON
+output, so a cached verdict is never silently green. A `control resolve [--all]`
+command forces a fresh re-resolution.
 
-### Controls and Checks become reference-backed
-- `Control` and `Check` gain an **optional `ref: Ref`**.
-- **When `ref` is present:** `title`, `status`, and (for checks) `last_result` are
-  **DERIVED by resolving the ref on read** — not hand-set. The stored title (if
-  any) is a fallback display label, never the authority. Add explicit states:
-  **`Unresolved`** (pointer can't be followed — dangling/missing) and **`Stale`**
-  (resolved, but the cached resolution is older than a freshness bound or the
-  source changed). Cache the last resolution for display; mark it honestly.
-- **When `ref` is absent:** the v0 hand-set path still works, but is surfaced as
-  **`asserted (unverified)`** — never as proven.
-- **The honesty rule (closes the Principle-5 hole):** a reference-backed control
-  can NEVER show implemented/green when its resolved source says fail/red. Derived
-  status always reflects the source.
+### P0 — Make the safe path the easy path (steer, don't just warn)
+- `control add --ref-cmd …` prints a one-line notice recommending the
+  report-artifact path when one is available.
+- Add **`--ref-report <path> <anchor>`** sugar = a `file_anchor` pointed at a
+  result artifact (e.g. a `conformance-report.json` status), the zero-drift path,
+  in one flag.
+- `readiness` surfaces each control's **ref-kind drift profile** (live-resolved vs
+  cached-command vs stale) so the weakest links are visible.
 
-Backward-compatible: every v0 command keeps working; `ref` is additive
-(skip-serialized when absent, so existing stores load unchanged).
+### P1 — Source-artifact staleness signal for `file_anchor`
+Record + surface the **mtime/age of the resolved source file**, so a confidently
+`derived: met` value carries an age ("derived from artifact 9 days old"). Optional:
+a freshness bound on the *source artifact* that flags it stale in `readiness`.
+muster must be honest that its truth is only as fresh as what it points at.
 
-### `readiness` becomes a true truth-meter
-- Distinguish **derived** (resolved from source at `<ts>`) from **asserted**
-  (hand-set, unverified) — extend the existing proven/asserted split.
-- Flag **unresolved / stale / dangling** refs as gap findings (not silent green).
-- For evidence, **verify the target exists** (file on disk / anchor present), not
-  just that a record is present.
-- The honest top-line verdict already never reads green over gaps — extend it to
-  count unresolved/stale refs as gaps.
+### P1 — Anchor validation + a resolve/doctor surface
+- Validate a `file_anchor`'s dotted anchor **resolves at store time**; refuse or
+  warn on a dangling anchor at creation, naming the fix.
+- `control resolve --all` (or a `muster doctor`) re-resolves every ref and reports
+  anchors that have silently gone `Unresolved` after a source refactor.
 
-## Prioritized scope
-
-- **P0 — Resolvable `Ref` + dereference engine** (`file_anchor` + `command`), the
-  domain/infra/cli split above. The missing organ.
-- **P0 — Derived control/check status** from resolving the ref, with
-  `Unresolved`/`Stale` states and the asserted escape hatch marked unverified.
-- **P0 — Title as a resolved projection** (stored title becomes a fallback).
-- **P1 — Reference-import from a source manifest:** one command to ingest many
-  controls/checks as *references* (not copies) from a TOML/JSON requirements file,
-  so the control set is tied to the source. (Validates against ckeletin's
-  `conformance-mapping.toml`.)
-- **P1 — Staleness / dangling-reference detection in `readiness`** (verify targets
-  exist; record resolution timestamps; surface stale results).
-- **P1 — N:M control ↔ implementation:** one requirement satisfied by many
-  implementations, each with its own *derived* status (CKSPEC-ARCH-001 met by both
-  ckeletin-rust AND ckeletin-go), instead of duplicated or coupled state.
-- **P2 — Revision propagation:** a `revise --because <signal>` flags the
-  controls/processes that reference the revised source so they can be re-evaluated.
+### P2 — Residual SSOT + propagation + safety
+- The decorative on-disk `resolved { value, source_excerpt }` cache for
+  `file_anchor` controls is **ignored on read** but is a stored copy of source
+  text. Drop it, or mark it explicitly non-authoritative in the schema (SSOT #7).
+- **Issue/nonconformity downward propagation:** a failing control flags dependent
+  processes for re-evaluation in the feedback model (the partial 6th v0 finding).
+- **Cycle-safety test** for readiness traversal across ref-backed controls (prove
+  a self/mutual reference can't loop).
 
 ## AX / dual-surface conventions (unchanged, non-negotiable)
-Every command accepts `--output json` mirroring all fields (no human-only data, no
-markdown in JSON); honest exit codes; not-found/invalid errors name the fix;
-`explain` maps intents → commands; deterministic ordering. New derived/resolution
-fields appear in JSON structurally (`resolved`, `resolved_ts`, `source`, and the
-`asserted|derived|unresolved|stale` distinction).
+Every command `--output json` mirrors all fields (no human-only data, no markdown
+in JSON); honest exit codes; errors name the fix; `explain` maps intents→commands;
+deterministic ordering. New v2 fields (`resolved_age_secs`, `served_from_cache`,
+source-artifact age, ref-kind drift profile) appear structurally in JSON.
 
 ## Definition of Done — the validator grades this (and we re-dogfood after)
 
-Built on the existing muster code; **`just check` green; every v0 capability still
-works (no regression)**. Then, end-to-end and verifiable by a cold agent via
-`--output json`:
+Built on existing v0/v1; **`just check` green; no regression** (v0 + v1 capabilities
+still pass). Then, end-to-end, verifiable by a cold agent via `--output json`:
 
-1. A control with `ref: file_anchor` pointing at a TOML/JSON file derives its
-   `title` from that file on read; **edit the source value and muster reflects the
-   change** on the next read (not stale-forever).
-2. A check with `ref: file_anchor` pointing at a result artifact (or `command`)
-   derives `pass`/`fail` from the source; **muster cannot mark it pass when the
-   source says fail** — demonstrate the attempt is impossible/ignored (the
-   Principle-5 honesty hole is closed).
-3. A dangling/missing ref resolves to **`Unresolved`** and shows in `readiness` as
-   a gap, never a silent green; a stale resolution shows as **`Stale`**.
-4. `readiness --output json` distinguishes **derived** vs **asserted** controls and
-   counts unresolved/stale as gaps in the honest verdict.
-5. **Reference-import (P1):** import a set of controls as references from a
-   TOML/JSON requirements file in one command; the imported controls are tied to
-   the source (re-resolvable), not transcribed copies.
-6. **N:M (P1):** one requirement linked to two implementation processes, each
-   carrying its own derived status.
-7. **The ckeletin acceptance (read-only on ckeletin):** point a control at
-   `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml#<a real CKSPEC id>`
-   and a check at that repo's derived conformance result (or `just check`); muster
-   **derives** the status from the real source and **refuses to show green when the
-   source is red** — proving muster now points-at-and-resolves rather than copies.
+1. **Drift window closed:** create a `--ref-cmd` control whose command checks for a
+   file; with the file present it derives green; **delete the file and re-read —
+   the control is NO LONGER green** (it re-resolved live, or is `Stale` and
+   not-green), and the output shows the resolved age. The exact v0/re-dogfood gap
+   is provably shut.
+2. **Safe path is reachable + steered:** `--ref-report <path> <anchor>` creates a
+   zero-drift report-backed control in one flag; `--ref-cmd` emits the steering
+   notice; `readiness` shows the ref-kind drift profile.
+3. **Source-artifact age surfaced:** a `file_anchor` control shows the age of its
+   source file; a control pointing at an old artifact carries a visible age signal.
+4. **Anchor validation:** adding a control with a non-existent anchor is refused or
+   flagged at creation; `control resolve --all` flags an anchor that went
+   `Unresolved` after the source changed.
+5. **No regression:** the v1 re-dogfood chain still passes — import 40 CKSPEC
+   controls by reference, derive titles/status from the real
+   `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml` (read-only), N:M
+   implementations, honesty rule intact.
+6. **(P2 as completed):** decorative cache dropped/marked; cycle-safety test green;
+   propagation flag if built.
 
-## Out of scope for v1 (do NOT build)
-No embedded LLM. No UI. No network (no `url` ref kind yet). No re-implementation of
-ckeletin's conformance engine — muster POINTS AT it, never reproduces it. No
-multi-tenant/auth. Keep it minimal: the win is honesty (resolve-don't-copy), not
-features.
+## Out of scope for v2 (do NOT build)
+No embedded LLM. No UI. No network/HTTP ref kind. No re-implementation of
+ckeletin's conformance engine — muster POINTS AT it. No multi-tenant/auth. Keep it
+minimal: v2 is about *honesty under every ref kind*, not new surface area.
 
 ---
 
 ## How to build this — the Manifesto (every phase: read and apply it)
 
 Built by autonomous agents (planner, critic, executor, reviewer, validator).
-**Every phase must read and develop by Peiman's Manifesto**
-(github.com/peiman/manifesto). The validator grades manifesto-alignment — above
-all, **#7 (reference the source, don't copy it)** and **#10 (a spec is a
-hypothesis; implementations test it; it evolves)** — not just feature presence.
-This very SPEC is v1 *because* v0's hypothesis was refuted by a real dogfood (#2:
-failures are signals; #4: reality is the spec). Keep muster honest about its own
-glue thesis.
+**Every phase reads and develops by Peiman's Manifesto**
+(github.com/peiman/manifesto). The validator grades manifesto-alignment — above all
+**#9 Automated Enforcement** (the safe path must be *enforced/default*, not merely
+documented; a stale signal must be *structurally* unable to show green) and **#7
+SSOT / #1 Truth-Seeking** (resolve from the source; surface real freshness; no
+stored copy is authoritative). This whole muster arc is **#10** in action: v0 was a
+hypothesis a dogfood refuted; v1 fixed it and a re-dogfood confirmed it while
+finding this v2 edge. Keep muster honest about its own glue thesis.
 
 The ten principles, verbatim:
 
