@@ -111,7 +111,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_process_status(&mut self, id: &str, status: ProcessStatus) -> Result<(), DomainError> {
+    pub fn set_process_status(
+        &mut self,
+        id: &str,
+        status: ProcessStatus,
+    ) -> Result<(), DomainError> {
         let p = self
             .processes
             .get_mut(id)
@@ -239,14 +243,14 @@ impl Store {
         ts: &str,
     ) -> Result<(), DomainError> {
         self.require_process(pid)?;
-        if let Some(b) = &because {
-            if !self.is_known_cause(b) {
-                return Err(DomainError::mref(
-                    "cause",
-                    b,
-                    "--because must cite an existing incident, nonconformity, or check id",
-                ));
-            }
+        if let Some(b) = &because
+            && !self.is_known_cause(b)
+        {
+            return Err(DomainError::mref(
+                "cause",
+                b,
+                "--because must cite an existing incident, nonconformity, or check id",
+            ));
         }
         let p = self.processes.get_mut(pid).expect("checked above");
         p.revisions.push(Revision {
@@ -300,7 +304,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_control_status(&mut self, id: &str, status: ControlStatus) -> Result<(), DomainError> {
+    pub fn set_control_status(
+        &mut self,
+        id: &str,
+        status: ControlStatus,
+    ) -> Result<(), DomainError> {
         let c = self
             .controls
             .get_mut(id)
@@ -501,8 +509,11 @@ impl Store {
             Grey,
             Black,
         }
-        let mut color: BTreeMap<&str, Color> =
-            self.processes.keys().map(|k| (k.as_str(), Color::White)).collect();
+        let mut color: BTreeMap<&str, Color> = self
+            .processes
+            .keys()
+            .map(|k| (k.as_str(), Color::White))
+            .collect();
         let mut cycles: Vec<Vec<String>> = Vec::new();
 
         // Iterative DFS with an explicit stack of (node, child-index) and a path.
@@ -549,10 +560,11 @@ impl Store {
         let mut out = Vec::new();
         if let Some(p) = self.processes.get(id) {
             for s in &p.steps {
-                if let Some(r) = &s.process_ref {
-                    if self.processes.contains_key(r) && seen.insert(r.as_str()) {
-                        out.push(r.as_str());
-                    }
+                if let Some(r) = &s.process_ref
+                    && self.processes.contains_key(r)
+                    && seen.insert(r.as_str())
+                {
+                    out.push(r.as_str());
                 }
             }
         }
@@ -618,10 +630,7 @@ impl std::fmt::Display for TreeView {
 impl TreeView {
     fn render(&self, f: &mut std::fmt::Formatter<'_>, depth: usize) -> std::fmt::Result {
         let pad = "  ".repeat(depth);
-        let status = self
-            .status
-            .map(|s| format!(" [{s}]"))
-            .unwrap_or_default();
+        let status = self.status.map(|s| format!(" [{s}]")).unwrap_or_default();
         writeln!(f, "{pad}{} — {}{}", self.id, self.name, status)?;
         for s in &self.steps {
             let spad = "  ".repeat(depth + 1);
@@ -677,7 +686,9 @@ mod tests {
     #[test]
     fn step_with_missing_process_ref_is_rejected() {
         let mut s = store_with(&["p1"]);
-        let err = s.add_step("p1", "do", None, vec![], Some("ghost".into())).unwrap_err();
+        let err = s
+            .add_step("p1", "do", None, vec![], Some("ghost".into()))
+            .unwrap_err();
         assert!(matches!(err, DomainError::MissingReference { .. }));
     }
 
@@ -698,7 +709,10 @@ mod tests {
         let mut s = store_with(&["p1"]);
         let cid = s.add_check("p1", "runbook", Enforcement::Ci).unwrap();
         assert_eq!(cid, "check-1");
-        assert_eq!(s.process("p1").unwrap().checks[0].last_result, CheckResult::Unknown);
+        assert_eq!(
+            s.process("p1").unwrap().checks[0].last_result,
+            CheckResult::Unknown
+        );
         s.ingest_check("p1", &cid, CheckResult::Pass, "2026-01-01T00:00:00Z", None)
             .unwrap();
         let c = &s.process("p1").unwrap().checks[0];
@@ -711,8 +725,15 @@ mod tests {
         let mut s = store_with(&["p1"]);
         s.report_incident("inc-1", "Outage", Severity::High, Some("p1".into()))
             .unwrap();
-        s.raise_nonconformity("nc-1", "slow", NonconformitySource::Manual, Some("inc-1".into()), None, None)
-            .unwrap();
+        s.raise_nonconformity(
+            "nc-1",
+            "slow",
+            NonconformitySource::Manual,
+            Some("inc-1".into()),
+            None,
+            None,
+        )
+        .unwrap();
         let nc = s.nonconformity("nc-1").unwrap();
         assert_eq!(nc.source, NonconformitySource::Incident);
         assert_eq!(nc.process_ref.as_deref(), Some("p1"));
@@ -721,11 +742,20 @@ mod tests {
     #[test]
     fn revise_appends_and_validates_because() {
         let mut s = store_with(&["p1"]);
-        s.report_incident("inc-1", "O", Severity::Medium, None).unwrap();
-        s.revise("p1", "tightened", Some("inc-1".into()), "2026-01-01T00:00:00Z")
+        s.report_incident("inc-1", "O", Severity::Medium, None)
             .unwrap();
+        s.revise(
+            "p1",
+            "tightened",
+            Some("inc-1".into()),
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
         assert_eq!(s.process("p1").unwrap().revisions.len(), 1);
-        assert_eq!(s.process("p1").unwrap().revisions[0].because.as_deref(), Some("inc-1"));
+        assert_eq!(
+            s.process("p1").unwrap().revisions[0].because.as_deref(),
+            Some("inc-1")
+        );
         // unknown cause rejected
         assert!(s.revise("p1", "x", Some("ghost".into()), "t").is_err());
     }
@@ -733,8 +763,10 @@ mod tests {
     #[test]
     fn detect_cycles_finds_two_node_cycle_and_terminates() {
         let mut s = store_with(&["a", "b"]);
-        s.add_step("a", "to b", None, vec![], Some("b".into())).unwrap();
-        s.add_step("b", "to a", None, vec![], Some("a".into())).unwrap();
+        s.add_step("a", "to b", None, vec![], Some("b".into()))
+            .unwrap();
+        s.add_step("b", "to a", None, vec![], Some("a".into()))
+            .unwrap();
         let cycles = s.detect_cycles();
         assert!(!cycles.is_empty(), "expected a cycle");
         assert!(cycles[0].contains(&"a".to_string()) && cycles[0].contains(&"b".to_string()));
@@ -759,8 +791,10 @@ mod tests {
     #[test]
     fn show_tree_on_cycle_terminates_with_marker() {
         let mut s = store_with(&["a", "b"]);
-        s.add_step("a", "to b", None, vec![], Some("b".into())).unwrap();
-        s.add_step("b", "to a", None, vec![], Some("a".into())).unwrap();
+        s.add_step("a", "to b", None, vec![], Some("b".into()))
+            .unwrap();
+        s.add_step("b", "to a", None, vec![], Some("a".into()))
+            .unwrap();
         let tree = s.show_tree("a").unwrap();
         // a -> b -> (cycle back to a)
         let b_node = match &tree.steps[0].sub {

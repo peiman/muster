@@ -1,64 +1,44 @@
-# ckeletin-rust
+# muster
 
-Rust CLI scaffold implementing the [ckeletin specification](https://github.com/peiman/ckeletin). AI-first CLI framework with compile-time architecture enforcement.
+> *پندارِ نیک، گفتارِ نیک، کردارِ نیک* — good thoughts, good words, good deeds.
+> *Skynda långsamt.*
 
-## Architecture
+**muster** is a minimalistic, AI-first command-line **ledningssystem** (management
+system) for startups and midsize companies with **no compliance department**. Run
+your management system as a living **process map**, become **ISO-certification-ready**
+without consultants, and handle **incidents / command & control** — from one small,
+honest tool, usable by AI agents and humans alike.
 
-```
-.ckeletin/          vendored framework — replaced wholesale by `just ckeletin-update`
-├── crate/src/      config, logging, output, catalog, build_info, process
-└── conform/        conformance generator binary
+The name carries the thesis: *muster* the team and resources (incident C2) **and**
+*pass muster* (meet the standard). Two jobs, one spine.
 
-crates/
-├── domain/         serde only — business logic, no framework deps
-├── infrastructure/ re-export shim — exposes .ckeletin/crate to cli
-└── cli/            clap + domain + infrastructure — entry point
-    └── src/
-        ├── main.rs     bootstrap only: parse, config, logging init, dispatch, error rendering
-        ├── root.rs     Cli struct, Commands enum
-        ├── ping.rs     example command
-        ├── version.rs  build identity command
-        └── catalog.rs  machine-readable command catalog (CKSPEC-AGENT-006)
-```
+## The core idea — a process is a hypothesis
 
-Directed dependencies enforced by Cargo.toml at compile time. If domain code imports clap → **compile error**. Not a lint. Not a convention. The compiler refuses.
+A process in muster is not true because someone wrote it down. It is a *hypothesis*
+about how work should be done — tested by evidence, refuted by incidents and
+nonconformities, strengthened by automated conformance checks. When reality
+outgrows a process, the process is **revised**, and that change is recorded. This
+is the scientific method as a ledningssystem (Manifesto #10, Feedback Cycle).
 
-## Quick Start
+## Quick start
 
 ```bash
-git clone https://github.com/peiman/ckeletin-rust
-cd ckeletin-rust
-just check    # fmt + clippy + test + deny + health
-
-# Template workflow: initialize a new derived project
-just init my-app
+muster init                                   # zero-config; you are working
+muster process add incident-mgmt --name "Incident Management" --owner ciso
+muster control add a5-24 --title "Incident planning" --clause-ref "ISO 27001 A.5.24"
+muster process link-control incident-mgmt a5-24
+muster readiness                              # the honest truth-meter
+muster explain                                # intent -> command map (no manual)
 ```
 
-> **Already-initialized guard:** `just init` detects if the project has already
-> been initialized (name in `Cargo.toml` no longer matches the scaffold slug) and
-> exits with an explanation. Pass `true` as the second positional argument to override: `just init my-app true`.
+Every command supports `--output json` whose fields mirror the human text exactly
+(dual surface, one source of truth). Exit codes are honest; errors name the fix.
 
-```bash
-# Run the scaffold commands
-cargo run -p cli -- ping
-cargo run -p cli -- --output json ping
+## Design
 
-# Machine-readable command catalog (CKSPEC-AGENT-006)
-cargo run -p cli -- catalog
-cargo run -p cli -- --output json catalog
-```
+Built on the [ckeletin-rust](https://github.com/peiman/ckeletin-rust) framework with
+strict layering (`crates/{domain,infrastructure,cli}`): the domain is pure (entities,
+graph traversal, readiness), the cli owns the disk boundary (file-per-entity JSON,
+git-diffable, no database). `just check` is the conformance gate.
 
-## Spec Conformance
-
-Implements the [ckeletin spec](https://github.com/peiman/ckeletin) across six
-domains — Architecture, Enforcement, Testing, Output, Agent Readiness, and
-Changelog. Conformance is validated in CI by `just conform` against
-`conformance-mapping.toml`.
-
-See **[CONFORMANCE.md](CONFORMANCE.md)** for the exact spec version, requirement
-count, and per-requirement evidence — kept there as the single source of truth
-rather than duplicated here, where it would drift.
-
-## License
-
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.
+Run `muster explain` for the full command surface, or `muster <cmd> --help`.

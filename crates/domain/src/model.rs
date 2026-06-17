@@ -529,7 +529,15 @@ mod tests {
 
     #[test]
     fn slug_rejects_invalid() {
-        for s in ["", "1abc", "Abc", "has space", "-leading", "under_score", "trailing-OK!"] {
+        for s in [
+            "",
+            "1abc",
+            "Abc",
+            "has space",
+            "-leading",
+            "under_score",
+            "trailing-OK!",
+        ] {
             assert!(validate_slug(s).is_err(), "{s} should be invalid");
         }
     }
@@ -538,13 +546,19 @@ mod tests {
     fn enum_from_str_roundtrips() {
         assert_eq!("ci".parse::<Enforcement>().unwrap(), Enforcement::Ci);
         assert_eq!(Enforcement::Ci.to_string(), "ci");
-        assert_eq!("under_review".parse::<ProcessStatus>().unwrap(), ProcessStatus::UnderReview);
+        assert_eq!(
+            "under_review".parse::<ProcessStatus>().unwrap(),
+            ProcessStatus::UnderReview
+        );
     }
 
     #[test]
     fn enum_from_str_rejects_garbage_naming_allowed_values() {
         let err = "nope".parse::<Enforcement>().unwrap_err();
-        assert!(err.contains("compile_time"), "error must name allowed values: {err}");
+        assert!(
+            err.contains("compile_time"),
+            "error must name allowed values: {err}"
+        );
         assert!(err.contains("honor"));
     }
 

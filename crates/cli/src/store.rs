@@ -1,0 +1,220 @@
+//! Persistence — the disk boundary (Manifesto #8: domain stays pure, this layer
+//! owns I/O). One JSON file per entity, git-diffable, no database (#4 minimal).
+//!
+//! Data-dir resolution is the single source of truth (#7): `MUSTER_DATA_DIR` if
+//! set, else `./.muster`. Every command loads the four entity dirs into the
+//! in-memory `domain::Store`, calls a pure domain op, then saves.
+
+use domain::{Control, Incident, Nonconformity, Process, Store};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const ENV_DATA_DIR: &str = "MUSTER_DATA_DIR";
+const DEFAULT_DATA_DIR: &str = "./.muster";
+const MANIFEST: &str = "manifest.json";
+const SCHEMA_VERSION: u32 = 1;
+
+const SUBDIRS: [(&str, EntityKind); 4] = [
+    ("processes", EntityKind::Process),
+    ("controls", EntityKind::Control),
+    ("incidents", EntityKind::Incident),
+    ("nonconformities", EntityKind::Nonconformity),
+];
+
+#[derive(Clone, Copy)]
+enum EntityKind {
+    Process,
+    Control,
+    Incident,
+    Nonconformity,
+}
+
+/// Errors at the disk boundary. `Display` names the corrective action (#3).
+#[derive(thiserror::Error, Debug)]
+pub enum StoreError {
+    #[error("store not initialized — run: muster init")]
+    NotInitialized,
+    #[error("filesystem error at {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not parse {path} (corrupt store?): {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// Resolve the data dir: `MUSTER_DATA_DIR` env var, else `./.muster`.
+pub fn data_dir() -> PathBuf {
+    match std::env::var(ENV_DATA_DIR) {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(DEFAULT_DATA_DIR),
+    }
+}
+
+fn io_err(path: &Path, source: std::io::Error) -> StoreError {
+    StoreError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
+pub fn is_initialized(dir: &Path) -> bool {
+    dir.join(MANIFEST).is_file()
+}
+
+/// Create the store layout: entity dirs + `manifest.json`. Idempotent.
+pub fn init(dir: &Path) -> Result<(), StoreError> {
+    std::fs::create_dir_all(dir).map_err(|e| io_err(dir, e))?;
+    for (sub, _) in SUBDIRS {
+        let p = dir.join(sub);
+        std::fs::create_dir_all(&p).map_err(|e| io_err(&p, e))?;
+    }
+    let manifest = dir.join(MANIFEST);
+    let body = serde_json::json!({ "schema_version": SCHEMA_VERSION });
+    let text = serde_json::to_string_pretty(&body).expect("manifest serializes");
+    std::fs::write(&manifest, format!("{text}\n")).map_err(|e| io_err(&manifest, e))?;
+    Ok(())
+}
+
+/// Load the four entity dirs into the in-memory aggregate.
+pub fn load(dir: &Path) -> Result<Store, StoreError> {
+    if !is_initialized(dir) {
+        return Err(StoreError::NotInitialized);
+    }
+    let mut store = Store::default();
+    for (sub, kind) in SUBDIRS {
+        let subdir = dir.join(sub);
+        if !subdir.is_dir() {
+            continue;
+        }
+        let entries = std::fs::read_dir(&subdir).map_err(|e| io_err(&subdir, e))?;
+        // Collect + sort paths so load order is deterministic.
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| io_err(&subdir, e))?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        for path in paths {
+            let text = std::fs::read_to_string(&path).map_err(|e| io_err(&path, e))?;
+            let parse_err = |source| StoreError::Parse {
+                path: path.display().to_string(),
+                source,
+            };
+            match kind {
+                EntityKind::Process => {
+                    let p: Process = serde_json::from_str(&text).map_err(parse_err)?;
+                    store.processes.insert(p.id.clone(), p);
+                }
+                EntityKind::Control => {
+                    let c: Control = serde_json::from_str(&text).map_err(parse_err)?;
+                    store.controls.insert(c.id.clone(), c);
+                }
+                EntityKind::Incident => {
+                    let i: Incident = serde_json::from_str(&text).map_err(parse_err)?;
+                    store.incidents.insert(i.id.clone(), i);
+                }
+                EntityKind::Nonconformity => {
+                    let n: Nonconformity = serde_json::from_str(&text).map_err(parse_err)?;
+                    store.nonconformities.insert(n.id.clone(), n);
+                }
+            }
+        }
+    }
+    Ok(store)
+}
+
+fn write_entity<T: serde::Serialize>(
+    dir: &Path,
+    sub: &str,
+    id: &str,
+    value: &T,
+) -> Result<(), StoreError> {
+    let path = dir.join(sub).join(format!("{id}.json"));
+    let text = serde_json::to_string_pretty(value).map_err(|source| StoreError::Parse {
+        path: path.display().to_string(),
+        source,
+    })?;
+    std::fs::write(&path, format!("{text}\n")).map_err(|e| io_err(&path, e))
+}
+
+/// Persist every entity to its `<id>.json` (pretty, stable key order via the
+/// struct field order + BTreeMap iteration).
+pub fn save(dir: &Path, store: &Store) -> Result<(), StoreError> {
+    save_map(dir, "processes", &store.processes)?;
+    save_map(dir, "controls", &store.controls)?;
+    save_map(dir, "incidents", &store.incidents)?;
+    save_map(dir, "nonconformities", &store.nonconformities)?;
+    Ok(())
+}
+
+fn save_map<T: serde::Serialize>(
+    dir: &Path,
+    sub: &str,
+    map: &BTreeMap<String, T>,
+) -> Result<(), StoreError> {
+    for (id, value) in map {
+        write_entity(dir, sub, id, value)?;
+    }
+    Ok(())
+}
+
+/// Current UTC timestamp as RFC-3339 (`YYYY-MM-DDThh:mm:ssZ`). Computed at the
+/// cli boundary and passed *into* domain ops so the domain stays clock-free.
+pub fn now_iso() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = i64::try_from(secs / 86_400).unwrap_or(0);
+    let rem = secs % 86_400;
+    let (h, mi, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
+}
+
+/// Days-since-epoch → (year, month, day). Howard Hinnant's `civil_from_days`,
+/// computed entirely in `i64`. The final `month`/`day` are mathematically
+/// bounded to [1,12] / [1,31], so the narrowing casts are exact.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn civil_from_days_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(18_993), (2022, 1, 1));
+    }
+
+    #[test]
+    fn now_iso_is_rfc3339_shaped() {
+        let ts = now_iso();
+        assert_eq!(ts.len(), 20, "got {ts}");
+        assert!(ts.ends_with('Z'));
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], "T");
+    }
+}

@@ -1,11 +1,15 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use domain::{
+    ControlStatus, Enforcement, EvidenceKind, NonconformitySource, ProcessStatus, Severity,
+};
 
-/// A production-ready Rust CLI built with muster.
+/// muster — an AI-first ledningssystem: run your management system as a living
+/// process map, become certification-ready, and handle incidents. One spine.
 #[derive(Parser, Debug)]
 #[command(name = "muster", about)]
 pub struct Cli {
     /// Output format: text (human-readable, default) or json (machine-readable).
-    /// Explicit --output text overrides config json=true or CKELETIN_JSON=true.
+    /// Explicit --output text overrides config json=true or MUSTER_JSON=true.
     #[arg(long, global = true)]
     pub output: Option<OutputFormat>,
 
@@ -36,10 +40,285 @@ pub enum OutputFormat {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Check connectivity — returns pong
+    /// Initialize the muster store in this project (creates the data dir)
+    Init,
+    /// Map intents → commands (no manual required)
+    Explain,
+    /// Manage processes — the spine (add, show, steps, controls, checks, revise)
+    Process(ProcessCmd),
+    /// Manage controls — standard-agnostic requirements you must meet
+    Control(ControlCmd),
+    /// Incident command & control — report, log, close
+    Incident(IncidentCmd),
+    /// Nonconformities — findings against a process/control (the refuting signal)
+    Nonconformity(NonconformityCmd),
+    /// Certification-readiness truth-meter over the process graph
+    Readiness(ReadinessArgs),
+
+    /// Check connectivity — returns pong (framework worked example)
     Ping,
     /// Print the binary's build identity (version, commit, date, dirty)
     Version,
     /// Emit the machine-readable command catalog (CKSPEC-AGENT-006)
     Catalog,
+}
+
+// Generic value-parser for domain enums (FromStr<Err = String>). Keeps clap in
+// the cli layer while the enum definitions stay pure-domain (Manifesto #8).
+fn parse_enum<T: std::str::FromStr<Err = String>>(s: &str) -> Result<T, String> {
+    s.parse::<T>()
+}
+
+// ── process ──────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct ProcessCmd {
+    #[command(subcommand)]
+    pub sub: ProcessSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProcessSub {
+    /// Stand up a new process (a hypothesis; defaults to status=proposed)
+    Add {
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+    },
+    /// Show a process; --tree expands sub-processes (cycle-safe)
+    Show {
+        id: String,
+        #[arg(long)]
+        tree: bool,
+    },
+    /// List all processes (id-sorted)
+    List,
+    /// Move a process along its hypothesis lifecycle
+    SetStatus {
+        id: String,
+        #[arg(value_parser = parse_enum::<ProcessStatus>)]
+        status: ProcessStatus,
+    },
+    /// Manage a process's steps
+    Step(StepCmd),
+    /// Link a control so it governs the whole process
+    LinkControl { id: String, control_id: String },
+    /// Manage a process's risks
+    Risk(RiskCmd),
+    /// Manage a process's metrics
+    Metric(MetricCmd),
+    /// Manage / ingest conformance checks (the #9 enforcement seam)
+    Check(CheckArgs),
+    /// Record a revision — the #10 feedback cycle (append-only, auditable)
+    Revise {
+        id: String,
+        summary: String,
+        /// Id of the incident / nonconformity / check that triggered this change
+        #[arg(long)]
+        because: Option<String>,
+    },
+    /// Attach evidence to a process
+    AttachEvidence {
+        id: String,
+        #[arg(value_parser = parse_enum::<EvidenceKind>)]
+        kind: EvidenceKind,
+        value: String,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct StepCmd {
+    #[command(subcommand)]
+    pub sub: StepSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StepSub {
+    /// Add an ordered step; --process-ref delegates to a sub-process
+    Add {
+        id: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        owner: Option<String>,
+        #[arg(long = "control")]
+        control: Vec<String>,
+        #[arg(long = "process-ref")]
+        process_ref: Option<String>,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct RiskCmd {
+    #[command(subcommand)]
+    pub sub: RiskSub,
+}
+#[derive(Subcommand, Debug)]
+pub enum RiskSub {
+    /// Add a risk to a process
+    Add { id: String, risk: String },
+}
+
+#[derive(Args, Debug)]
+pub struct MetricCmd {
+    #[command(subcommand)]
+    pub sub: MetricSub,
+}
+#[derive(Subcommand, Debug)]
+pub enum MetricSub {
+    /// Add a metric to a process
+    Add { id: String, metric: String },
+}
+
+/// `process check` has two SPEC forms: `check add <id> --description --enforcement`
+/// (create) and `check <id> <check-id> --pass|--fail` (ingest a result). The
+/// subcommand-or-args idiom makes both literal invocations work.
+#[derive(Args, Debug)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct CheckArgs {
+    #[command(subcommand)]
+    pub sub: Option<CheckSub>,
+    /// Ingest form: the process id
+    pub id: Option<String>,
+    /// Ingest form: the check id
+    pub check_id: Option<String>,
+    /// Record a passing result
+    #[arg(long, conflicts_with = "fail")]
+    pub pass: bool,
+    /// Record a failing result
+    #[arg(long)]
+    pub fail: bool,
+    /// Optional evidence for the result: <kind> <value>
+    #[arg(long, num_args = 2, value_names = ["KIND", "VALUE"])]
+    pub evidence: Option<Vec<String>>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum CheckSub {
+    /// Create a conformance check on a process
+    Add {
+        id: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long, value_parser = parse_enum::<Enforcement>)]
+        enforcement: Enforcement,
+    },
+}
+
+// ── control ──────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct ControlCmd {
+    #[command(subcommand)]
+    pub sub: ControlSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ControlSub {
+    /// Define a control (any framework — muster is standard-agnostic)
+    Add {
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long = "clause-ref")]
+        clause_ref: Option<String>,
+        #[arg(long)]
+        applicable: Option<bool>,
+    },
+    /// List all controls
+    List,
+    /// Show a control
+    Show { id: String },
+    /// Set a control's implementation status
+    SetStatus {
+        id: String,
+        #[arg(value_parser = parse_enum::<ControlStatus>)]
+        status: ControlStatus,
+    },
+    /// Attach evidence to a control
+    AttachEvidence {
+        id: String,
+        #[arg(value_parser = parse_enum::<EvidenceKind>)]
+        kind: EvidenceKind,
+        value: String,
+    },
+}
+
+// ── incident ─────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct IncidentCmd {
+    #[command(subcommand)]
+    pub sub: IncidentSub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IncidentSub {
+    /// Report an incident (muster the team — C2)
+    Report {
+        id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, value_parser = parse_enum::<Severity>)]
+        severity: Option<Severity>,
+        #[arg(long = "process")]
+        process: Option<String>,
+    },
+    /// List all incidents
+    List,
+    /// Show an incident
+    Show { id: String },
+    /// Append a timeline note to an incident
+    Log { id: String, note: String },
+    /// Close an incident
+    Close { id: String },
+}
+
+// ── nonconformity ────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct NonconformityCmd {
+    #[command(subcommand)]
+    pub sub: NonconformitySub,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum NonconformitySub {
+    /// Raise a nonconformity; --from-incident copies its process_ref
+    Raise {
+        id: String,
+        #[arg(long)]
+        description: String,
+        #[arg(long = "from-incident")]
+        from_incident: Option<String>,
+        #[arg(long = "process")]
+        process: Option<String>,
+        #[arg(long = "control")]
+        control: Option<String>,
+        #[arg(long, value_parser = parse_enum::<NonconformitySource>)]
+        source: Option<NonconformitySource>,
+    },
+    /// List all nonconformities
+    List,
+    /// Show a nonconformity
+    Show { id: String },
+    /// Resolve (close) a nonconformity, optionally recording the corrective action
+    Resolve {
+        id: String,
+        #[arg(long = "corrective-action")]
+        corrective_action: Option<String>,
+    },
+}
+
+// ── readiness ────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct ReadinessArgs {
+    /// Scope to one process and its reachable sub-graph
+    #[arg(long = "process")]
+    pub process: Option<String>,
 }

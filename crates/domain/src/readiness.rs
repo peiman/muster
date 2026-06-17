@@ -78,10 +78,10 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
     let cycles = scoped_cycles(store, scope, &in_scope);
     let gap_findings = gap_findings(store, scope, &in_scope, &cycles);
 
-    let verdict = if gap_findings.is_empty()
-        && refuting_signals.is_empty()
-        && control_coverage.percent == 100.0
-    {
+    // Full coverage via exact integer equality (no float comparison): every
+    // applicable control is implemented-with-evidence.
+    let full_coverage = control_coverage.implemented_with_evidence == control_coverage.applicable;
+    let verdict = if gap_findings.is_empty() && refuting_signals.is_empty() && full_coverage {
         "READY".to_string()
     } else {
         format!("GAPS: {}", gap_findings.len())
@@ -102,7 +102,11 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
 /// The applicable controls relevant to this view. Unscoped: every applicable
 /// control. Scoped: applicable controls referenced by the sub-graph
 /// (`process.controls[]` ∪ each `step.controls[]`).
-fn applicable_controls(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<String>) -> Vec<String> {
+fn applicable_controls(
+    store: &Store,
+    scope: Option<&str>,
+    in_scope: &BTreeSet<String>,
+) -> Vec<String> {
     if scope.is_none() {
         return store
             .controls
@@ -130,7 +134,11 @@ fn applicable_controls(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<S
         .collect()
 }
 
-fn control_coverage(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<String>) -> ControlCoverage {
+fn control_coverage(
+    store: &Store,
+    scope: Option<&str>,
+    in_scope: &BTreeSet<String>,
+) -> ControlCoverage {
     let applicable_ids = applicable_controls(store, scope, in_scope);
     let applicable = applicable_ids.len();
     let mut implemented_with_evidence = 0usize;
@@ -145,7 +153,9 @@ fn control_coverage(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<Stri
             implemented_with_evidence += 1;
         } else {
             let reason = match (c.status, has_evidence) {
-                (ControlStatus::Implemented, false) => "implemented but has no evidence".to_string(),
+                (ControlStatus::Implemented, false) => {
+                    "implemented but has no evidence".to_string()
+                }
                 (status, _) => format!("status is {status}, not implemented-with-evidence"),
             };
             gaps.push(CoverageGap {
@@ -154,6 +164,9 @@ fn control_coverage(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<Stri
             });
         }
     }
+    // Counts are tiny (entity counts), far below f64's 2^52 exact-integer range,
+    // so the precision-loss lint does not apply in practice.
+    #[allow(clippy::cast_precision_loss)]
     let percent = if applicable == 0 {
         100.0
     } else {
@@ -259,7 +272,8 @@ fn enforcement(store: &Store, in_scope: &BTreeSet<String>) -> Vec<EnforcementEnt
                 flag: Some("no_enforcement".to_string()),
             }),
             Some(e) => {
-                let flag = (e == crate::model::Enforcement::Honor).then(|| "honor_only".to_string());
+                let flag =
+                    (e == crate::model::Enforcement::Honor).then(|| "honor_only".to_string());
                 out.push(EnforcementEntry {
                     process_id: pid.clone(),
                     strongest: Some(e.to_string()),
@@ -271,7 +285,11 @@ fn enforcement(store: &Store, in_scope: &BTreeSet<String>) -> Vec<EnforcementEnt
     out
 }
 
-fn scoped_cycles(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<String>) -> Vec<Vec<String>> {
+fn scoped_cycles(
+    store: &Store,
+    scope: Option<&str>,
+    in_scope: &BTreeSet<String>,
+) -> Vec<Vec<String>> {
     let all = store.detect_cycles();
     match scope {
         None => all,
@@ -324,7 +342,8 @@ fn gap_findings(
     let scoped_control =
         |id: &str| -> bool { scope.is_none() || applicable_in_scope(store, scope, in_scope, id) };
     for c in store.controls.values() {
-        if c.status == ControlStatus::Implemented && c.evidence.is_empty() && scoped_control(&c.id) {
+        if c.status == ControlStatus::Implemented && c.evidence.is_empty() && scoped_control(&c.id)
+        {
             out.push(GapFinding {
                 kind: "control_no_evidence".into(),
                 subject_id: c.id.clone(),
@@ -335,10 +354,10 @@ fn gap_findings(
     // Open nonconformities with no corrective action.
     for n in store.nonconformities.values() {
         let relevant = scope.is_none()
-            || n.process_ref.as_deref().is_some_and(|p| in_scope.contains(p));
-        if relevant
-            && nc_open(n.status)
-            && n.corrective_action.as_deref().unwrap_or("").is_empty()
+            || n.process_ref
+                .as_deref()
+                .is_some_and(|p| in_scope.contains(p));
+        if relevant && nc_open(n.status) && n.corrective_action.as_deref().unwrap_or("").is_empty()
         {
             out.push(GapFinding {
                 kind: "nonconformity_no_corrective_action".into(),
@@ -358,13 +377,19 @@ fn gap_findings(
     out
 }
 
-fn applicable_in_scope(store: &Store, scope: Option<&str>, in_scope: &BTreeSet<String>, id: &str) -> bool {
+fn applicable_in_scope(
+    store: &Store,
+    scope: Option<&str>,
+    in_scope: &BTreeSet<String>,
+    id: &str,
+) -> bool {
     if scope.is_none() {
         return true;
     }
     in_scope.iter().any(|pid| {
         store.processes.get(pid).is_some_and(|p| {
-            p.controls.iter().any(|c| c == id) || p.steps.iter().any(|s| s.controls.iter().any(|c| c == id))
+            p.controls.iter().any(|c| c == id)
+                || p.steps.iter().any(|s| s.controls.iter().any(|c| c == id))
         })
     })
 }
@@ -394,7 +419,11 @@ impl fmt::Display for Readiness {
             writeln!(f, "  enforcement:")?;
             for e in &self.enforcement {
                 let strongest = e.strongest.as_deref().unwrap_or("none");
-                let flag = e.flag.as_ref().map(|fl| format!(" [{fl}]")).unwrap_or_default();
+                let flag = e
+                    .flag
+                    .as_ref()
+                    .map(|fl| format!(" [{fl}]"))
+                    .unwrap_or_default();
                 writeln!(f, "    {} — {}{}", e.process_id, strongest, flag)?;
             }
         }
@@ -444,8 +473,16 @@ mod tests {
     fn coverage_math_and_gap() {
         let mut s = base();
         s.add_control("c1", "C1", None, true).unwrap();
-        s.set_control_status("c1", ControlStatus::Implemented).unwrap();
-        s.attach_control_evidence("c1", Evidence { kind: EvidenceKind::Note, value: "x".into() }).unwrap();
+        s.set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            "c1",
+            Evidence {
+                kind: EvidenceKind::Note,
+                value: "x".into(),
+            },
+        )
+        .unwrap();
         s.add_control("c2", "C2", None, true).unwrap(); // applicable, no evidence
         let r = readiness(&s, None);
         assert_eq!(r.control_coverage.applicable, 2);
@@ -460,10 +497,18 @@ mod tests {
         s.set_process_status("p1", ProcessStatus::Active).unwrap();
         // no evidence yet -> asserted
         assert!(readiness(&s, None).asserted.contains(&"p1".to_string()));
-        s.attach_process_evidence("p1", Evidence { kind: EvidenceKind::Note, value: "v".into() }).unwrap();
+        s.attach_process_evidence(
+            "p1",
+            Evidence {
+                kind: EvidenceKind::Note,
+                value: "v".into(),
+            },
+        )
+        .unwrap();
         assert!(readiness(&s, None).proven.contains(&"p1".to_string()));
         // open incident refutes
-        s.report_incident("inc-1", "O", Severity::High, Some("p1".into())).unwrap();
+        s.report_incident("inc-1", "O", Severity::High, Some("p1".into()))
+            .unwrap();
         let r = readiness(&s, None);
         assert!(r.asserted.contains(&"p1".to_string()));
         assert!(r.refuting_signals.iter().any(|x| x.process_id == "p1"));
@@ -473,14 +518,29 @@ mod tests {
     fn resolving_signals_removes_them_and_moves_numbers() {
         let mut s = base();
         s.set_process_status("p1", ProcessStatus::Active).unwrap();
-        s.report_incident("inc-1", "O", Severity::High, Some("p1".into())).unwrap();
-        s.raise_nonconformity("nc-1", "slow", NonconformitySource::Manual, Some("inc-1".into()), None, None).unwrap();
+        s.report_incident("inc-1", "O", Severity::High, Some("p1".into()))
+            .unwrap();
+        s.raise_nonconformity(
+            "nc-1",
+            "slow",
+            NonconformitySource::Manual,
+            Some("inc-1".into()),
+            None,
+            None,
+        )
+        .unwrap();
         let before = readiness(&s, None);
         assert!(!before.refuting_signals.is_empty());
-        s.resolve_nonconformity("nc-1", Some("fixed".into())).unwrap();
+        s.resolve_nonconformity("nc-1", Some("fixed".into()))
+            .unwrap();
         s.close_incident("inc-1").unwrap();
         let after = readiness(&s, None);
-        assert!(!after.refuting_signals.iter().any(|r| r.source.contains("nc-1") || r.source.contains("inc-1")));
+        assert!(
+            !after
+                .refuting_signals
+                .iter()
+                .any(|r| r.source.contains("nc-1") || r.source.contains("inc-1"))
+        );
         // SC-9 delta: refuting_signals count dropped.
         assert!(after.refuting_signals.len() < before.refuting_signals.len());
     }
@@ -489,7 +549,8 @@ mod tests {
     fn enforcement_reports_strongest_on_ladder() {
         let mut s = base();
         let c = s.add_check("p1", "d", Enforcement::Ci).unwrap();
-        s.ingest_check("p1", &c, CheckResult::Pass, "t", None).unwrap();
+        s.ingest_check("p1", &c, CheckResult::Pass, "t", None)
+            .unwrap();
         let r = readiness(&s, None);
         let e = r.enforcement.iter().find(|e| e.process_id == "p1").unwrap();
         assert_eq!(e.strongest.as_deref(), Some("ci"));
@@ -513,8 +574,16 @@ mod tests {
         s.add_metric("p1", "m").unwrap();
         s.add_control("c1", "C", None, true).unwrap();
         s.link_control("p1", "c1").unwrap();
-        s.set_control_status("c1", ControlStatus::Implemented).unwrap();
-        s.attach_control_evidence("c1", Evidence { kind: EvidenceKind::Note, value: "x".into() }).unwrap();
+        s.set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            "c1",
+            Evidence {
+                kind: EvidenceKind::Note,
+                value: "x".into(),
+            },
+        )
+        .unwrap();
         s.set_process_status("p1", ProcessStatus::Active).unwrap();
         let r = readiness(&s, None);
         assert_eq!(r.verdict, "READY", "unexpected gaps: {:?}", r.gap_findings);
@@ -524,8 +593,10 @@ mod tests {
     fn cycle_is_reported_in_gap_findings_and_cycles() {
         let mut s = base();
         s.add_process("p2", "P2", None, None).unwrap();
-        s.add_step("p1", "", None, vec![], Some("p2".into())).unwrap();
-        s.add_step("p2", "", None, vec![], Some("p1".into())).unwrap();
+        s.add_step("p1", "", None, vec![], Some("p2".into()))
+            .unwrap();
+        s.add_step("p2", "", None, vec![], Some("p1".into()))
+            .unwrap();
         let r = readiness(&s, None);
         assert!(!r.cycles.is_empty());
         assert!(r.gap_findings.iter().any(|g| g.kind == "cycle"));

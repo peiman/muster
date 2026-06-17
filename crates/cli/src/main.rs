@@ -2,9 +2,18 @@
 //! All logic lives in domain and infrastructure crates.
 
 mod catalog;
+mod control;
+mod explain;
+mod incident;
+mod init;
+mod nonconformity;
 mod ping;
+mod process;
+mod readiness;
 mod root;
+mod store;
 mod version;
+mod view;
 
 use infrastructure::{
     config::Config,
@@ -164,6 +173,13 @@ fn parse_args() -> root::Cli {
 /// extend this alongside their own `root::Commands` additions.
 fn subcommand_name(command: &root::Commands) -> &'static str {
     match command {
+        root::Commands::Init => "init",
+        root::Commands::Explain => "explain",
+        root::Commands::Process(_) => "process",
+        root::Commands::Control(_) => "control",
+        root::Commands::Incident(_) => "incident",
+        root::Commands::Nonconformity(_) => "nonconformity",
+        root::Commands::Readiness(_) => "readiness",
         root::Commands::Ping => "ping",
         root::Commands::Version => "version",
         root::Commands::Catalog => "catalog",
@@ -270,6 +286,13 @@ fn run_inner(cli: root::Cli) -> Result<(LogGuard, ()), RunError> {
     // the caller receives the guard alongside the error — keeping the audit
     // worker alive through error rendering (CKSPEC-OUT-004 fix).
     let dispatch_result = match cli.command {
+        root::Commands::Init => init::execute(&output),
+        root::Commands::Explain => explain::execute(&output),
+        root::Commands::Process(c) => process::execute(c.sub, &output),
+        root::Commands::Control(c) => control::execute(c.sub, &output),
+        root::Commands::Incident(c) => incident::execute(c.sub, &output),
+        root::Commands::Nonconformity(c) => nonconformity::execute(c.sub, &output),
+        root::Commands::Readiness(a) => readiness::execute(a, &output),
         root::Commands::Ping => ping::execute(&output).map_err(|e| Box::new(e) as _),
         root::Commands::Version => version::execute(&output).map_err(|e| Box::new(e) as _),
         root::Commands::Catalog => catalog::execute(&output).map_err(|e| Box::new(e) as _),
