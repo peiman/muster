@@ -36,6 +36,22 @@ const INTENTS: &[(&str, &str)] = &[
         "muster control add <id> --title <t> --clause-ref <ref>",
     ),
     (
+        "Point a control at a source (resolve title/status on read, don't copy)",
+        "muster control add <id> --title <t> --ref-file <path> --ref-anchor <dotted.anchor>",
+    ),
+    (
+        "Re-resolve a reference (refresh the cached resolution)",
+        "muster control resolve <id>",
+    ),
+    (
+        "Import requirements as references from a manifest",
+        "muster control import <manifest> --format toml|json --prefix requirements",
+    ),
+    (
+        "Link an implementation (N:M — one requirement, many implementations)",
+        "muster control add-implementation <id> --impl-id <iid> --ref-file <path> --ref-anchor <a>",
+    ),
+    (
         "Prove a control",
         "muster control set-status <id> implemented && muster control attach-evidence <id> <kind> <value>",
     ),
@@ -46,6 +62,10 @@ const INTENTS: &[(&str, &str)] = &[
     (
         "Wire the #9 enforcement seam",
         "muster process check add <id> --description <d> --enforcement <compile_time|lint|script|ci|honor>",
+    ),
+    (
+        "Back a check by a source (derive pass/fail, can't be forged)",
+        "muster process check add <id> --description <d> --enforcement ci --ref-cmd \"just check\" --ref-dir <path>",
     ),
     (
         "Ingest a conformance result",

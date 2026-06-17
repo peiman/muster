@@ -820,3 +820,68 @@ fn sc11_ckeletin_acceptance_refuses_green_over_red() {
     let p = data(&d, &["process", "show", "p1"]);
     assert_eq!(p["checks"][0]["last_result"], "fail");
 }
+
+#[test]
+fn sc13_explain_and_catalog_cover_the_glue_commands() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    // explain maps the new intents to the new commands.
+    let ex = data(&d, &["explain"]);
+    let intents = ex["intents"].as_array().unwrap();
+    let cmds: Vec<&str> = intents
+        .iter()
+        .map(|i| i["command"].as_str().unwrap())
+        .collect();
+    assert!(
+        cmds.iter().any(|c| c.contains("--ref-file")),
+        "explain must teach --ref-file"
+    );
+    assert!(
+        cmds.iter().any(|c| c.contains("control import")),
+        "explain must teach import"
+    );
+    assert!(
+        cmds.iter().any(|c| c.contains("add-implementation")),
+        "explain must teach N:M"
+    );
+
+    // catalog enumerates the new subcommands + flags (derived from the clap tree).
+    let cat = data(&d, &["catalog"]);
+    let control = cat["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "control")
+        .unwrap();
+    let sub_names: Vec<&str> = control["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    for expected in ["resolve", "add-implementation", "import"] {
+        assert!(
+            sub_names.contains(&expected),
+            "catalog missing control {expected}: {sub_names:?}"
+        );
+    }
+    // The add subcommand exposes the ref flags structurally.
+    let add = control["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "add")
+        .unwrap();
+    let flags: Vec<&str> = add["flags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["long"].as_str().unwrap())
+        .collect();
+    assert!(
+        flags.contains(&"ref-file"),
+        "catalog control add missing --ref-file: {flags:?}"
+    );
+}
