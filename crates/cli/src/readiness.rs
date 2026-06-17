@@ -68,13 +68,25 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
     let mut index: BTreeMap<String, Derived> = BTreeMap::new();
     let mut drift_profiles: Vec<DriftProfileEntry> = Vec::new();
     for c in s.controls.values() {
-        let own = resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh, cmd_cache);
+        let own = resolve::project(
+            c.r#ref.as_ref(),
+            c.resolved.as_ref(),
+            &now,
+            fresh,
+            cmd_cache,
+        );
         let own_opt = c.is_ref_backed().then(|| own.clone());
         let impls: Vec<Derived> = c
             .implementations
             .iter()
             .map(|im| {
-                resolve::project(Some(&im.r#ref), im.resolved.as_ref(), &now, fresh, cmd_cache)
+                resolve::project(
+                    Some(&im.r#ref),
+                    im.resolved.as_ref(),
+                    &now,
+                    fresh,
+                    cmd_cache,
+                )
             })
             .collect();
         let projected = c.project(own_opt, impls);
@@ -85,13 +97,11 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
                 id: c.id.clone(),
                 profile: domain::drift_profile(r, &projected, cmd_cache),
             });
-        } else if !c.implementations.is_empty() {
-            if let Some(r) = c.implementations.first().map(|im| &im.r#ref) {
-                drift_profiles.push(DriftProfileEntry {
-                    id: c.id.clone(),
-                    profile: domain::drift_profile(r, &projected, cmd_cache),
-                });
-            }
+        } else if let Some(r) = c.implementations.first().map(|im| &im.r#ref) {
+            drift_profiles.push(DriftProfileEntry {
+                id: c.id.clone(),
+                profile: domain::drift_profile(r, &projected, cmd_cache),
+            });
         }
         index.insert(c.id.clone(), projected);
     }

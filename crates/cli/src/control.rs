@@ -200,7 +200,13 @@ impl ControlView<'_> {
         let now = store::now_iso();
         let fresh = store::freshness_secs();
         let cmd_cache = store::cmd_cache_enabled();
-        let own = resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh, cmd_cache);
+        let own = resolve::project(
+            c.r#ref.as_ref(),
+            c.resolved.as_ref(),
+            &now,
+            fresh,
+            cmd_cache,
+        );
         let impl_views: Vec<ImplView> = c
             .implementations
             .iter()
@@ -452,13 +458,25 @@ fn resolve_all(dir: &std::path::Path, output: &Output) -> Boxed {
         if !c.is_ref_backed() && c.implementations.is_empty() {
             continue; // asserted controls have no ref to re-resolve.
         }
-        let own = resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh, cmd_cache);
+        let own = resolve::project(
+            c.r#ref.as_ref(),
+            c.resolved.as_ref(),
+            &now,
+            fresh,
+            cmd_cache,
+        );
         let own_opt = c.is_ref_backed().then(|| own.clone());
         let impls: Vec<Derived> = c
             .implementations
             .iter()
             .map(|im| {
-                resolve::project(Some(&im.r#ref), im.resolved.as_ref(), &now, fresh, cmd_cache)
+                resolve::project(
+                    Some(&im.r#ref),
+                    im.resolved.as_ref(),
+                    &now,
+                    fresh,
+                    cmd_cache,
+                )
             })
             .collect();
         let projected = c.project(own_opt, impls);

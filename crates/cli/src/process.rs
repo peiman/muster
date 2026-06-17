@@ -274,8 +274,13 @@ impl ProcessShow {
         let mut display_clone = p.clone();
         for c in &mut display_clone.checks {
             if c.is_ref_backed() {
-                let derived =
-                    resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh, cmd_cache);
+                let derived = resolve::project(
+                    c.r#ref.as_ref(),
+                    c.resolved.as_ref(),
+                    &now,
+                    fresh,
+                    cmd_cache,
+                );
                 c.last_result = c.effective_result(Some(&derived));
             }
         }

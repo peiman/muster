@@ -4,9 +4,13 @@
 //! infrastructure does the I/O but cannot see domain. This module owns the clock
 //! and the resolution policy: it calls the right infra resolver, maps the infra
 //! result to a `domain::Resolution`, and projects it to the honest `Derived`
-//! display state — re-resolving `file_anchor` refs live on every read (so edits
-//! to the source reflect immediately, SC-3) while serving the cached resolution
-//! for `command` refs (which go `Stale` past the freshness bound, SC-7).
+//! display state — re-resolving BOTH `file_anchor` AND (by default) `command`
+//! refs live on every read, so a passed verdict can never outlive reality
+//! (Manifesto #9: the drift window is structurally closed). Only the opt-in
+//! `MUSTER_CMD_CACHE` mode serves a stored command verdict, which then goes
+//! `Stale` past the freshness bound. Every resolved projection carries its
+//! freshness evidence (`resolved_age_secs` / `served_from_cache`, plus the source
+//! artifact's age for `file_anchor`).
 
 use crate::store;
 use domain::reference::{Derived, Outcome, Ref, Resolution};
@@ -288,7 +292,13 @@ mod tests {
             other => panic!("expected Stale, got {other:?}"),
         }
         // generous freshness, same ts ⇒ fresh (still served from cache).
-        match project(Some(&r), Some(&cached), "2026-01-01T00:00:00Z", 86_400, true) {
+        match project(
+            Some(&r),
+            Some(&cached),
+            "2026-01-01T00:00:00Z",
+            86_400,
+            true,
+        ) {
             Derived::Derived {
                 served_from_cache,
                 resolved_age_secs,

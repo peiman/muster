@@ -40,8 +40,16 @@ const INTENTS: &[(&str, &str)] = &[
         "muster control add <id> --ref-file <path> --ref-anchor <dotted.anchor>",
     ),
     (
+        "Point a control at a result artifact (the zero-drift safe path — one flag, no re-run)",
+        "muster control add <id> --ref-report <result.json> <dotted.anchor>",
+    ),
+    (
         "Re-resolve a reference (refresh the cached resolution)",
         "muster control resolve <id>",
+    ),
+    (
+        "Re-resolve every ref + flag anchors that silently went unresolved (doctor)",
+        "muster control resolve --all",
     ),
     (
         "Import requirements as references from a manifest",

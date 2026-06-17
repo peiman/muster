@@ -674,7 +674,14 @@ fn sc6_dangling_ref_is_refused_at_store_time_then_unresolved_is_a_gap() {
     data(
         &d,
         &[
-            "control", "add", "c2", "--title", "x", "--ref-file", &src, "--ref-anchor",
+            "control",
+            "add",
+            "c2",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
             "r.r1.status",
         ],
     );
@@ -707,8 +714,17 @@ fn sc7_command_ref_goes_stale_at_freshness_zero_in_cache_mode() {
     muster(&d)
         .env("MUSTER_CMD_CACHE", "1")
         .args([
-            "control", "add", "c1", "--title", "x", "--ref-cmd", "true", "--ref-dir", &dir,
-            "--output", "json",
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-cmd",
+            "true",
+            "--ref-dir",
+            &dir,
+            "--output",
+            "json",
         ])
         .assert()
         .success();
@@ -948,5 +964,408 @@ fn sc13_explain_and_catalog_cover_the_glue_commands() {
     assert!(
         flags.contains(&"ref-file"),
         "catalog control add missing --ref-file: {flags:?}"
+    );
+}
+
+// ── v2: honest glue — no stale green, the safe path is the default ────────────
+
+/// SC-1 (the headline): DRIFT-WINDOW-CLOSED. A `--ref-cmd` control derives green
+/// while the guarded file exists; delete the file and re-read WITHOUT any
+/// intervening resolve — the control is no longer green (it re-resolved live),
+/// outcome is fail, and the resolved age is surfaced (Manifesto #9).
+#[test]
+fn sc1_drift_window_closed() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let dir = tmp.path().to_string_lossy().into_owned();
+    let guard = tmp.path().join("guard.txt");
+    std::fs::write(&guard, "x").unwrap();
+    let cmd = format!("test -f {}", guard.display());
+
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-drift",
+            "--title",
+            "x",
+            "--ref-cmd",
+            &cmd,
+            "--ref-dir",
+            &dir,
+        ],
+    );
+    let c = data(&d, &["control", "show", "c-drift"]);
+    assert_eq!(c["status"], "implemented", "green while guard present");
+    assert_eq!(c["resolution"]["resolution_state"], "derived");
+    assert_eq!(c["resolution"]["outcome"], "pass");
+    assert_eq!(
+        c["resolution"]["resolved_age_secs"], 0,
+        "live read is age 0"
+    );
+    assert_eq!(c["resolution"]["served_from_cache"], false);
+
+    // Delete the guarded file; re-read with NO resolve call.
+    std::fs::remove_file(&guard).unwrap();
+    let c2 = data(&d, &["control", "show", "c-drift"]);
+    assert_ne!(
+        c2["status"], "implemented",
+        "control must NOT be green after the guard is deleted: {c2}"
+    );
+    assert_eq!(
+        c2["resolution"]["outcome"], "fail",
+        "re-resolved live to fail"
+    );
+    assert!(
+        c2["resolution"]["resolved_age_secs"].is_number(),
+        "resolved age must still be surfaced: {c2}"
+    );
+}
+
+/// SC-2: resolved age + served_from_cache present in JSON AND rendered in human.
+#[test]
+fn sc2_resolved_age_surfaced_both_surfaces() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c1"]);
+    assert_eq!(c["resolution"]["resolved_age_secs"], 0);
+    assert_eq!(c["resolution"]["served_from_cache"], false);
+    // Human surface mirrors it.
+    let out = muster(&d)
+        .args(["control", "show", "c1", "--output", "text"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("age=0s"), "human must show resolved age: {s}");
+    assert!(s.contains("live"), "human must show cache status: {s}");
+}
+
+/// SC-3: the safe path is reachable + steered. `--ref-report` makes a zero-drift
+/// file_anchor in one flag; `--ref-cmd` add emits a steering_notice (both
+/// surfaces); readiness exposes a per-control ref-kind drift profile.
+#[test]
+fn sc3_safe_path_reachable_and_steered() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let dir = tmp.path().to_string_lossy().into_owned();
+    let report = write_src(
+        &tmp,
+        "report.json",
+        r#"{"requirements":{"X":{"status":"met"}}}"#,
+    );
+
+    // --ref-report: one flag, derived file_anchor.
+    let rpt = data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-rpt",
+            "--ref-report",
+            &report,
+            "requirements.X.status",
+        ],
+    );
+    assert_eq!(rpt["ref"]["kind"], "file_anchor");
+    let c = data(&d, &["control", "show", "c-rpt"]);
+    assert_eq!(c["resolution"]["resolution_state"], "derived");
+
+    // --ref-cmd: steering notice in JSON.
+    let add = data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-cmd",
+            "--title",
+            "x",
+            "--ref-cmd",
+            "true",
+            "--ref-dir",
+            &dir,
+        ],
+    );
+    assert!(
+        add["steering_notice"]
+            .as_str()
+            .unwrap_or("")
+            .contains("--ref-report"),
+        "steering notice must recommend the report path: {add}"
+    );
+    // ... and in the human surface.
+    let out = muster(&d)
+        .args([
+            "control",
+            "add",
+            "c-cmd2",
+            "--title",
+            "y",
+            "--ref-cmd",
+            "true",
+            "--ref-dir",
+            &dir,
+            "--output",
+            "text",
+        ])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("notice:") && s.contains("--ref-report"),
+        "human add must render the steering notice: {s}"
+    );
+
+    // readiness drift profile, from the fixed set.
+    let r = data(&d, &["readiness"]);
+    let dp = r["drift_profiles"]
+        .as_array()
+        .expect("drift_profiles array");
+    let allowed = [
+        "live_resolved",
+        "cached_command",
+        "stale",
+        "unresolved",
+        "asserted",
+    ];
+    for e in dp {
+        assert!(
+            allowed.contains(&e["profile"].as_str().unwrap()),
+            "profile must be from the fixed set: {e}"
+        );
+    }
+    assert!(
+        dp.iter()
+            .any(|e| e["id"] == "c-cmd" && e["profile"] == "live_resolved"),
+        "default command ref must profile live_resolved: {dp:?}"
+    );
+    assert!(
+        dp.iter()
+            .any(|e| e["id"] == "c-rpt" && e["profile"] == "live_resolved"),
+        "report-backed control must profile live_resolved: {dp:?}"
+    );
+}
+
+/// SC-4: a file_anchor control surfaces the age of its source artifact (mtime).
+#[test]
+fn sc4_source_artifact_age_surfaced() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let fresh = write_src(&tmp, "fresh.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-fresh",
+            "--title",
+            "x",
+            "--ref-file",
+            &fresh,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c-fresh"]);
+    let age = c["resolution"]["source_age_secs"]
+        .as_i64()
+        .expect("source_age_secs present for file_anchor");
+    assert!((0..60).contains(&age), "fresh source age ~0: {age}");
+
+    // Back-date the source mtime → the surfaced age grows visibly.
+    let old = write_src(&tmp, "old.toml", "[r.r1]\nstatus = \"met\"\n");
+    let _ = std::process::Command::new("touch")
+        .args(["-t", "202001010000", &old])
+        .status();
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-old",
+            "--title",
+            "x",
+            "--ref-file",
+            &old,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    let c2 = data(&d, &["control", "show", "c-old"]);
+    let old_age = c2["resolution"]["source_age_secs"].as_i64().unwrap();
+    assert!(
+        old_age > 60 * 60 * 24 * 365,
+        "back-dated source must show a large age: {old_age}"
+    );
+    // Human surface mirrors the source age.
+    let out = muster(&d)
+        .args(["control", "show", "c-old", "--output", "text"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("src_age="), "human must show source age: {s}");
+}
+
+/// SC-5: `control resolve --all` re-resolves every ref-backed control and flags
+/// any that silently went Unresolved; usage is exactly-one-of id/--all.
+#[test]
+fn sc5_resolve_all_flags_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    let rep = data(&d, &["control", "resolve", "--all"]);
+    assert_eq!(rep["unresolved_count"], 0);
+    assert!(
+        rep["resolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "c1" && e["resolution_state"] == "derived"),
+        "resolve --all must list c1 derived: {rep}"
+    );
+
+    // Refactor the source so the anchor is gone → c1 silently went Unresolved.
+    std::fs::write(&src, "[r.other]\nx = 1\n").unwrap();
+    let rep2 = data(&d, &["control", "resolve", "--all"]);
+    assert_eq!(rep2["unresolved_count"], 1, "report: {rep2}");
+    assert!(
+        rep2["resolved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "c1" && e["unresolved"] == true),
+        "resolve --all must flag c1 unresolved: {rep2}"
+    );
+
+    // Usage guards: not both, not neither.
+    let (ok, _) = run_json(&d, &["control", "resolve", "c1", "--all"]);
+    assert!(!ok, "id + --all must be refused");
+    let (ok2, _) = run_json(&d, &["control", "resolve"]);
+    assert!(!ok2, "neither id nor --all must be refused");
+}
+
+/// SC-7: readiness traversal terminates deterministically even when ref-backed
+/// controls sit on processes that form a graph cycle (no infinite loop).
+#[test]
+fn sc7_cycle_safety_readiness_terminates() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "add", "p2", "--name", "P2"]);
+    data(
+        &d,
+        &[
+            "process",
+            "step",
+            "add",
+            "p1",
+            "--description",
+            "x",
+            "--process-ref",
+            "p2",
+        ],
+    );
+    data(
+        &d,
+        &[
+            "process",
+            "step",
+            "add",
+            "p2",
+            "--description",
+            "x",
+            "--process-ref",
+            "p1",
+        ],
+    );
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    data(&d, &["process", "link-control", "p1", "c1"]);
+    // Must terminate and report the cycle deterministically.
+    let r = data(&d, &["readiness"]);
+    assert!(
+        !r["cycles"].as_array().unwrap().is_empty(),
+        "cycle must be detected: {r}"
+    );
+    let r2 = data(&d, &["readiness"]);
+    assert_eq!(r, r2, "readiness output must be deterministic");
+}
+
+/// SC-7 / Manifesto #7: a live-resolved ref (file_anchor; command in default
+/// mode) persists NO authoritative `resolved` copy on disk — truth is read from
+/// the source, not a stored excerpt.
+#[test]
+fn ssot_live_refs_persist_no_resolved_cache() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    let body = std::fs::read_to_string(d.join("controls").join("c1.json")).unwrap();
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v.get("resolved").is_none(),
+        "live file_anchor must not persist a resolved copy: {body}"
     );
 }
