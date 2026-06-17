@@ -78,6 +78,13 @@ pub fn is_stale(resolved_epoch: i64, now_epoch: i64, freshness_secs: i64) -> boo
 }
 
 /// The four honest display states surfaced in JSON (`resolution_state`).
+///
+/// Manifesto #1 (Truth-Seeking): every *resolved* projection carries the freshness
+/// evidence — `resolved_age_secs` (how old the served verdict is, ≥ 0) and
+/// `served_from_cache` (whether it came from a stored copy or a live read). A
+/// `file_anchor` projection additionally carries `source_age_secs`, the mtime age
+/// of the pointed-at artifact, so a confident `met` cannot hide that it derives
+/// from a file nobody regenerated.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "resolution_state", rename_all = "snake_case")]
 pub enum Derived {
@@ -87,11 +94,24 @@ pub enum Derived {
         resolved_ts: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         source_excerpt: Option<String>,
+        /// Age (s) of the served verdict: `now − resolved_ts`, saturating ≥ 0.
+        /// `0` for a live read; positive only when served from a cache.
+        resolved_age_secs: i64,
+        /// `true` only when the verdict came from a stored cache (opt-in command
+        /// cache); `false` for every live read (#7 — no stored copy is authority).
+        served_from_cache: bool,
+        /// Age (s) of the pointed-at source artifact by mtime, for `file_anchor`
+        /// refs (#1 — truth is only as fresh as what it points at). `None` for
+        /// command/note refs that have no single source file.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_age_secs: Option<i64>,
     },
     Stale {
         value: String,
         outcome: Outcome,
         resolved_ts: String,
+        resolved_age_secs: i64,
+        served_from_cache: bool,
     },
     Unresolved {
         reason: String,
@@ -122,6 +142,36 @@ impl Derived {
                 ..
             }
         )
+    }
+}
+
+/// The fixed-set ref-kind **drift profile** for a projected control — the
+/// honesty risk profile of its weakest link, surfaced in `readiness` (#9: make
+/// the weakest links *visible*, not merely documented). A pure mapping from the
+/// ref kind × projected `Derived` × command-cache mode, so it is testable + SSOT.
+///
+/// Values (a closed set the agent surface can rely on):
+/// - `live_resolved` — re-resolved live this read; no drift window.
+/// - `cached_command` — a command verdict served from the opt-in cache (drift-prone).
+/// - `stale` — a served verdict past its freshness bound (not green-eligible).
+/// - `unresolved` — the ref could not be followed.
+/// - `asserted` — no honesty claim (note/no-ref).
+pub fn drift_profile(r: &Ref, derived: &Derived, cmd_cache_on: bool) -> &'static str {
+    match derived {
+        Derived::Asserted => "asserted",
+        Derived::Unresolved { .. } => "unresolved",
+        Derived::Stale { .. } => "stale",
+        Derived::Derived { .. } => match r {
+            Ref::Note { .. } => "asserted",
+            Ref::FileAnchor { .. } => "live_resolved",
+            Ref::Command { .. } => {
+                if cmd_cache_on {
+                    "cached_command"
+                } else {
+                    "live_resolved"
+                }
+            }
+        },
     }
 }
 
@@ -172,16 +222,64 @@ mod tests {
             outcome: Outcome::Pass,
             resolved_ts: "t".into(),
             source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: None,
         };
         assert!(fresh_pass.is_green_eligible());
         let stale = Derived::Stale {
             value: "met".into(),
             outcome: Outcome::Pass,
             resolved_ts: "t".into(),
+            resolved_age_secs: 99,
+            served_from_cache: true,
         };
         assert!(!stale.is_green_eligible());
         assert!(!Derived::Asserted.is_green_eligible());
         assert!(!Derived::Unresolved { reason: "x".into() }.is_green_eligible());
+    }
+
+    #[test]
+    fn drift_profile_maps_kind_and_state() {
+        let file = Ref::FileAnchor {
+            path: "x.toml".into(),
+            anchor: "a.b".into(),
+        };
+        let cmd = Ref::Command {
+            cmd: "true".into(),
+            dir: ".".into(),
+        };
+        let note = Ref::Note { text: "m".into() };
+        let live = Derived::Derived {
+            value: "pass".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: Some(3),
+        };
+        let stale = Derived::Stale {
+            value: "pass".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            resolved_age_secs: 99,
+            served_from_cache: true,
+        };
+        // file_anchor live → live_resolved regardless of cache mode.
+        assert_eq!(drift_profile(&file, &live, false), "live_resolved");
+        assert_eq!(drift_profile(&file, &live, true), "live_resolved");
+        // command live: live_resolved when cache off, cached_command when on.
+        assert_eq!(drift_profile(&cmd, &live, false), "live_resolved");
+        assert_eq!(drift_profile(&cmd, &live, true), "cached_command");
+        // stale dominates the kind.
+        assert_eq!(drift_profile(&cmd, &stale, true), "stale");
+        // unresolved + asserted.
+        assert_eq!(
+            drift_profile(&file, &Derived::Unresolved { reason: "x".into() }, false),
+            "unresolved"
+        );
+        assert_eq!(drift_profile(&note, &Derived::Asserted, false), "asserted");
     }
 
     #[test]

@@ -4,7 +4,6 @@
 //! stay tied to the manifest via a `file_anchor` ref, so editing the manifest
 //! changes muster's output with no muster mutation.
 
-use crate::resolve;
 use crate::root::ManifestFormat;
 use crate::store;
 use domain::Ref;
@@ -76,7 +75,6 @@ pub fn execute(
     }
 
     let ids = resolver::list_keys(manifest, prefix)?;
-    let now = store::now_iso();
     let mut s = store::load(dir)?;
     let mut created = Vec::new();
     let mut skipped = Vec::new();
@@ -93,8 +91,8 @@ pub fn execute(
         match s.add_control(&slug, &slug, None, true) {
             Ok(()) => {
                 s.set_control_ref(&slug, r.clone())?;
-                let res = resolve::resolve(&r, &now);
-                s.set_control_resolution(&slug, res)?;
+                // #7 SSOT: imported controls are `file_anchor` refs that re-resolve
+                // live on read — no authoritative `resolved` copy is persisted.
                 created.push(slug);
             }
             Err(e) => skipped.push(Skipped {

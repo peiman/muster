@@ -635,11 +635,13 @@ fn sc4_and_sc5_checks_derive_and_cannot_be_forged() {
 }
 
 #[test]
-fn sc6_dangling_ref_is_unresolved_and_a_gap() {
+fn sc6_dangling_ref_is_refused_at_store_time_then_unresolved_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
     init(&d);
-    data(
+    // v2 (SC-5, Manifesto #9 fail-closed): a dangling file_anchor is REFUSED at
+    // creation, naming the fix — no control is persisted.
+    let (ok, env) = run_json(
         &d,
         &[
             "control",
@@ -653,7 +655,31 @@ fn sc6_dangling_ref_is_unresolved_and_a_gap() {
             "a.b",
         ],
     );
-    let c = data(&d, &["control", "show", "c1"]);
+    assert!(!ok, "adding a dangling file_anchor must be refused");
+    let err = env["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("/no/such/file.toml") && err.contains("a.b"),
+        "refusal must name the path + anchor: {env}"
+    );
+    // And it is not persisted (the doctor surface confirms it is absent).
+    let list = data(&d, &["control", "list"]);
+    assert!(
+        list.as_array().unwrap().is_empty(),
+        "refused control must not be persisted: {list}"
+    );
+
+    // A ref that resolves at creation but whose source later disappears surfaces
+    // as an honest ref_unresolved gap in readiness (the rot the doctor catches).
+    let src = write_src(&tmp, "src.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control", "add", "c2", "--title", "x", "--ref-file", &src, "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    std::fs::remove_file(&src).unwrap();
+    let c = data(&d, &["control", "show", "c2"]);
     assert_eq!(c["resolution"]["resolution_state"], "unresolved");
     let r = data(&d, &["readiness"]);
     assert!(r["verdict"].as_str().unwrap().starts_with("GAPS"));
@@ -669,33 +695,33 @@ fn sc6_dangling_ref_is_unresolved_and_a_gap() {
 }
 
 #[test]
-fn sc7_command_ref_goes_stale_at_freshness_zero() {
+fn sc7_command_ref_goes_stale_at_freshness_zero_in_cache_mode() {
+    // Re-homed to opt-in cache mode (MUSTER_CMD_CACHE=1): only there is a command
+    // verdict served from a cache that can go Stale. In the honest default a
+    // command ref re-resolves live (see sc1_drift_window_closed).
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
     init(&d);
     let dir = tmp.path().to_string_lossy().into_owned();
-    data(
-        &d,
-        &[
-            "control",
-            "add",
-            "c1",
-            "--title",
-            "x",
-            "--ref-cmd",
-            "true",
-            "--ref-dir",
-            &dir,
-        ],
-    );
-    // With freshness 0, the served command cache projects to stale.
+    // Add WITH cache on so a resolution is persisted to serve later.
+    muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args([
+            "control", "add", "c1", "--title", "x", "--ref-cmd", "true", "--ref-dir", &dir,
+            "--output", "json",
+        ])
+        .assert()
+        .success();
+    // With freshness 0 + cache on, the served command cache projects to stale.
     let out = muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
         .env("MUSTER_FRESHNESS_SECS", "0")
         .args(["control", "show", "c1", "--output", "json"])
         .output()
         .unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["data"]["resolution"]["resolution_state"], "stale");
+    assert_eq!(v["data"]["resolution"]["served_from_cache"], true);
 }
 
 #[test]

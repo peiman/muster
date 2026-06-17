@@ -1,463 +1,345 @@
-# PLAN — muster v1, the GLUE ENGINE
+# PLAN — muster v2 (honest glue: no stale green, safe path is the default)
 
-> Built on the v0 spine already in this repo. The one inversion: **stored truth →
-> truth resolved on read from the pointed-at source.** Manifesto-graded — above all
-> **#7 (reference the source, don't copy it)** and **#10 (the spec is a hypothesis;
-> v0's "recorder" hypothesis was refuted by the ckeletin dogfood, so v1 evolves it).**
-> Additive and backward-compatible: every v0 command keeps working, `ref` is
-> skip-serialized when absent, and `just check` must stay green at every step.
+> Manifesto, every step: **#9 Automated Enforcement** (the safe path must be
+> *structural/default*, not documented; a stale signal must be *unable* to show
+> green), **#7 SSOT** (resolve from the source; no stored copy is authoritative),
+> **#1 Truth-Seeking** (surface real freshness as evidence). Build ON v0/v1; do
+> NOT regress; `just check` stays green.
 
----
-
-## 0. Hard architectural constraints (read first — violating any one fails `just check`)
-
-These are compiler-/test-enforced today. The plan is designed around them; do **not**
-work around them.
-
-- **C1 — domain is I/O-free.** `crates/domain` may depend only on `serde` + `thiserror`
-  (enforced by `ckeletin-project.toml` `[allowlists]` + `arch_allowlist.rs`). NO `fs`,
-  NO `std::process`, NO reading files or running commands in domain. Domain defines
-  the pure `Ref`/`Resolution` types and the pure projection logic only.
-- **C2 — infrastructure must NOT depend on domain or cli** (CKSPEC-ARCH-005, enforced by
-  `infra_imports_domain` trybuild test + the allowlist). Therefore the resolver in
-  `crates/infrastructure` **cannot return `domain::Resolution`**. It returns
-  infrastructure-local plain structs; the **cli** layer bridges domain ↔ infra ↔ domain.
-- **C3 — infrastructure must not write to stdout/stderr** (`print_stdout`/`print_stderr`
-  = deny). The resolver returns data; cli renders.
-- **C4 — every new infra dependency must be added to BOTH `crates/infrastructure/Cargo.toml`
-  `[dependencies]` AND `ckeletin-project.toml` `[allowlists] infrastructure = [...]`,
-  exactly (the allowlist test asserts an exact set), each with a justification comment.**
-- **C5 — dual surface is non-negotiable:** every command supports `--output json`
-  mirroring all fields (no human-only strings in `data`, no markdown in JSON); honest
-  exit codes; deterministic (id-sorted) ordering. New fields appear structurally in JSON.
-- **C6 — domain stays clock-free.** Timestamps (`now`) are computed at the cli boundary
-  (`store::now_iso`) and passed *into* domain ops, exactly as v0 does.
-
-The bridge (the key design move forced by C1+C2):
-
-```
-cli  reads domain::Ref  ──extract primitives──▶  infrastructure::resolver
-                                                  (fs/process I/O, infra-local result)
-cli  maps infra result  ──▶ domain::Resolution ──▶ domain projection (pure, honest)
-cli  renders both surfaces
-```
+This plan is executed verbatim by the Executor. It is grounded in the current
+code (file:line references are real as of this iteration). Read the cited
+functions before editing them.
 
 ---
 
-## 1. Success Criteria (mechanically verifiable by the Reviewer)
+## 0. Ground truth — where the relevant code lives
 
-Each criterion is a command or check the Reviewer can run. SC-0..SC-2 gate everything;
-SC-3..SC-13 map to the SPEC Definition of Done items 1–7.
+| Concern | Location |
+|---|---|
+| `Ref` enum (`FileAnchor`/`Command`/`Note`), `Outcome`, `value_to_outcome`, `Resolution`, `Derived` (4 states), `is_stale` | `crates/domain/src/reference.rs` |
+| Honesty rule `own_blocks` / `effective_status`, `display_title` | `crates/domain/src/model.rs` (`effective_status` ~L514) |
+| Cycle detection `detect_cycles`, `successors` | `crates/domain/src/store.rs` (~L631) |
+| Resolution policy: `resolve()`, `project()`, `derived_from()`, `is_stale_now()` | `crates/cli/src/resolve.rs` |
+| Infra dereference: `resolve_file_anchor()`, `run_command()`, `walk_toml/json` | `crates/infrastructure/src/resolver.rs` |
+| Freshness env `MUSTER_FRESHNESS_SECS` (default 86400), `freshness_secs()`, clock `now_iso`, `parse_iso_to_epoch` | `crates/cli/src/store.rs` |
+| `control add/show/resolve/add-implementation/import`, `ControlView`, `ImplView`, `resolution_label` | `crates/cli/src/control.rs` |
+| CLI flags: `RefFlags`, `ControlSub`, `ReadinessArgs`, `Commands` | `crates/cli/src/root.rs` |
+| readiness command (index build + `readiness_with`) | `crates/cli/src/readiness.rs`; domain `crates/domain/src/readiness.rs` |
+| Integration tests + helpers (`data()`, `init()`, `write_src()`) | `crates/cli/tests/muster.rs` |
+| Gate | `just check` = `ckeletin-check test ckeletin-health` (`Justfile`) |
 
-- **SC-0 — No regression / green gate.** `just check` exits 0 (runs `ckeletin-check`,
-  the full `cargo test --workspace`, and `ckeletin-health`). Every pre-existing test in
-  `crates/cli/tests/muster.rs`, `crates/cli/tests/cli.rs`, `crates/domain/**`,
-  `crates/infrastructure/**` still passes unmodified in intent (existing assertions are
-  not weakened; new behavior is added, not substituted).
-- **SC-1 — Layer purity preserved.** `crates/domain/Cargo.toml` `[dependencies]` is still
-  exactly `{serde, thiserror}`; `crates/infrastructure/Cargo.toml` deps match
-  `ckeletin-project.toml` `[allowlists] infrastructure` exactly; `arch_allowlist.rs`,
-  `infra_imports_domain`, and all violation trybuild tests pass. `grep -rn
-  "std::fs\|std::process" crates/domain/src` returns nothing new.
-- **SC-2 — `ref` is additive / backward-compatible.** A v0 store written before this
-  change (a `control`/`check` JSON with no `ref` field) loads unchanged; serializing a
-  control/check with no ref produces JSON byte-identical to v0 (proven by an unchanged
-  golden assertion in `muster.rs` + a `skip_serializing_if = "Option::is_none"` /
-  `Vec::is_empty` round-trip test in domain).
-
-- **SC-3 (DoD #1) — title is a resolved projection.** A control with
-  `ref: file_anchor{path, anchor}` pointing at a TOML or JSON file renders its `title`
-  from the file on read. Concretely (integration test): create a temp `src.toml` with
-  `[requirements.r1]\ntitle = "Alpha"`; `muster control add c1 --title placeholder
-  --ref-file src.toml --ref-anchor requirements.r1.title`; `muster control show c1
-  --output json` ⇒ `data.title == "Alpha"` and `data.resolution.resolution_state ==
-  "derived"`. Edit the file to `title = "Beta"`; re-run show ⇒ `data.title == "Beta"`
-  (NOT stale-forever). The stored `title` ("placeholder") appears only as
-  `data.fallback_title`.
-- **SC-4 (DoD #2) — checks derive pass/fail from source.** A check with
-  `ref: file_anchor` at a status leaf (`status = "met"`) or `ref: command` derives
-  `last_result`: `met/pass/0-exit ⇒ pass`, `unmet/fail/non-zero ⇒ fail`. Integration:
-  `process check add` with `--ref-file`/`--ref-anchor` or `--ref-cmd`/`--ref-dir`;
-  `process show --output json` ⇒ the check's `last_result` equals the derived outcome.
-- **SC-5 (DoD #2 — the honesty rule / Principle-5 hole closed).** A ref-backed check
-  **cannot be hand-set to pass when the source says fail.** Point a check at a source
-  whose value is `unmet`; attempt `muster process check <pid> <check-id> --pass` ⇒ the
-  command **errors** with a message naming the ref as the authority (exit ≠ 0). A domain
-  unit test asserts: for a ref-backed check, `effective_result()` is the derived outcome
-  regardless of any stored `last_result`.
-- **SC-6 (DoD #3) — dangling ref ⇒ `Unresolved`, never silent green.** A control/check
-  whose `ref` points at a missing file or a missing anchor resolves to
-  `resolution_state == "unresolved"` with a `reason` that names the missing path/anchor.
-  In `readiness --output json` it appears as a `gap_finding` (kind `ref_unresolved`), and
-  the verdict is `GAPS:n`, never `READY`.
-- **SC-7 (DoD #3) — stale resolution ⇒ `Stale`.** With `MUSTER_FRESHNESS_SECS=0`, a
-  ref-backed entity whose cached resolution is older than `now` surfaces
-  `resolution_state == "stale"` (it shows the last value honestly, marked stale) and is
-  counted as a gap in `readiness`. (file_anchor refs re-resolve live each read and are
-  fresh; `command` refs serve the cache and go stale past the freshness bound — see §2.4.)
-- **SC-8 (DoD #4) — readiness distinguishes derived vs asserted and counts ref gaps.**
-  `readiness --output json` `data` separates **derived** controls (ref-backed, resolved)
-  from **asserted** controls (no ref, hand-set, surfaced as `asserted (unverified)`);
-  `gap_findings` includes any `ref_unresolved` / `ref_stale` / derived-`fail` controls;
-  the honest verdict counts them (never `READY` while any exists).
-- **SC-9 (DoD #5) — reference-import.** `muster control import <manifest> [--format
-  toml|json]` ingests every requirement in the manifest as a **reference** (each new
-  control carries `ref: file_anchor{path:<manifest>, anchor:<prefix>.<ID>.title}`), not a
-  transcribed copy. Integration: import a 3-requirement temp TOML ⇒ 3 controls created,
-  each `control show --output json` has a `ref` whose `path` equals the manifest and
-  re-resolves; editing a title in the manifest changes the imported control's shown title.
-- **SC-10 (DoD #6) — N:M control ↔ implementation.** A single control can carry
-  `implementations: [{id, ref}, ...]`; each implementation derives its **own** status.
-  Integration: one control with two implementations pointing at two different sources
-  (one `met`, one `unmet`) ⇒ `control show --output json` lists both with per-impl
-  `resolution`/outcome, and the control's aggregate honest status is **not green** (any
-  non-pass implementation blocks green).
-- **SC-11 (DoD #7) — the ckeletin acceptance (read-only).** Point a control's ref at
-  `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml` anchor
-  `requirements.CKSPEC-ARCH-001.title`, and a check at
-  `requirements.CKSPEC-ARCH-001.status` (or `--ref-cmd "just check" --ref-dir
-  /Users/peiman/dev/ckeletin-rust`). `muster control show`/`process show --output json`
-  **derive** title/status from the real file; muster **refuses to show green when the
-  source says red** (test: copy the manifest to a tempdir, flip the status to `unmet` ⇒
-  derived `fail` ⇒ control not green). muster reads ckeletin **read-only** (the test never
-  invokes a muster mutator against that repo).
-- **SC-12 — Manifesto alignment is real, not decorative.** `#7`: muster stores a pointer
-  (`Ref`), never a copy of the source's title/status — proven by SC-3/SC-9 (editing the
-  source changes muster's output with no muster mutation). `#8`: the domain/infra/cli
-  split in §2 holds (SC-1). `#10`: module docs cite the principle numbers they serve, and
-  any v0 statement now false is corrected (not duplicated).
-- **SC-13 — `explain` and `catalog` updated.** `muster explain` maps the new intents
-  ("point a control at a source", "import requirements", "link an implementation") to the
-  new commands; `muster catalog --output json` lists every new subcommand/flag. No intent
-  references a command that does not exist.
+**Layer rule (compiler-enforced, do not violate):** `crates/domain` is I/O-free
+(serde only — no fs/proc). All file/process I/O stays in `crates/infrastructure`.
+`crates/cli` is the only bridge. Any new infra dep must be declared in
+`ckeletin-project.toml` allowlists with a justification comment.
 
 ---
 
-## 2. Architecture
+## 1. Success Criteria (each mechanically verifiable by the Reviewer)
 
-### 2.1 New domain module: `crates/domain/src/reference.rs` (pure)
+All commands below are run with `--output json` against a temp store
+(`MUSTER_DATA_DIR`). "Field X present/equals Y" is checked against parsed JSON.
+Human (`--output text`) must mirror every field (dual-surface, non-negotiable).
 
-Add `pub mod reference;` to `lib.rs` and re-export the public types.
+**SC-0 — No regression / gate green.**
+`just check` passes (ckeletin-check + full test suite + ckeletin-health). Every
+pre-existing v0/v1 test still passes (those that assert the *old* command-cache
+default are updated per §3.7, not deleted — the behavior change is intentional
+and re-asserted by new tests).
 
-```rust
-use serde::{Deserialize, Serialize};
+**SC-1 — DRIFT-WINDOW-CLOSED (the headline proof).**
+Reproduce the re-dogfood gap and prove it is shut:
+1. `touch $TMP/guard.txt`
+2. `muster control add C-DRIFT --ref-cmd "test -f $TMP/guard.txt" --ref-dir $TMP`
+3. `muster control show C-DRIFT --output json` → `status` is green-eligible
+   (`implemented`/met), `resolution.resolution_state == "derived"`,
+   `resolution.outcome == "pass"`, and `resolution.resolved_age_secs == 0`,
+   `resolution.served_from_cache == false`.
+4. `rm $TMP/guard.txt`
+5. `muster control show C-DRIFT --output json` **without any intervening
+   resolve** → control is **NOT green** (`status != implemented`), and
+   `resolution.outcome == "fail"` (live) — and the resolved age is shown.
+   The control can never project green from a result older than its freshness
+   bound, regardless of ref kind.
 
-/// A typed pointer to an authoritative source (#7 — reference, don't copy).
-/// v1 resolver kinds only (no `url`/network — out of scope).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Ref {
-    /// Read a scalar at a dotted anchor in a TOML or JSON file. The PRIMARY glue.
-    FileAnchor { path: String, anchor: String },
-    /// Run a command in a dir; exit 0 = pass, non-zero = fail. Use sparingly.
-    Command { cmd: String, dir: String },
-    /// Opaque/manual — always surfaced as *asserted*, never proven.
-    Note { text: String },
-}
+**SC-2 — Resolved age always surfaced (human + JSON).**
+Every ref-backed control/implementation/check resolution carries
+`resolved_age_secs` (integer ≥ 0) and `served_from_cache` (bool) in JSON, and the
+human surface prints them (e.g. `derived: pass (Pass) age=0s live`). A cached
+verdict is never silently green.
 
-/// The honest outcome a resolved value implies. Pure mapping (#1 evidence).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome { Pass, Fail, Unknown }
+**SC-3 — Safe path reachable + steered.**
+- `muster control add C-RPT --ref-report $TMP/conformance-report.json requirements.X.status`
+  creates a zero-drift report-backed (`file_anchor`) control in ONE flag; its
+  `resolution.resolution_state == "derived"` and ref kind is `file_anchor`.
+- `muster control add C-CMD --ref-cmd "..." --ref-dir $TMP` emits a one-line
+  steering notice recommending the report path. The notice appears in JSON as a
+  structured field (e.g. `steering_notice`) AND in human output.
+- `muster readiness --output json` exposes, per ref-backed control, a
+  **ref-kind drift profile** field (e.g. `drift_profile`) with values drawn from
+  a fixed set: `live_resolved` | `cached_command` | `stale` | `unresolved` |
+  `asserted`. The weakest links are visible.
 
-/// Map a resolved scalar to an outcome. A title string ("Four-layer architecture")
-/// ⇒ Unknown (title-only, no honesty claim); a status token ⇒ Pass/Fail.
-pub fn value_to_outcome(value: &str) -> Outcome {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "met" | "pass" | "passed" | "ok" | "true" | "green" | "0" => Outcome::Pass,
-        "unmet" | "not_met" | "fail" | "failed" | "false" | "red" => Outcome::Fail,
-        _ => Outcome::Unknown,
-    }
-}
+**SC-4 — Source-artifact age for `file_anchor` (P1).**
+A `file_anchor` control's resolution carries `source_age_secs` (age of the
+pointed-at file by mtime) in JSON + human. A control pointing at an old artifact
+shows a visibly large `source_age_secs`; a freshly written one shows ~0.
 
-/// The result of dereferencing a Ref — pure data. Built by the cli from the infra
-/// resolver's output; consumed by the projection below. Cached on the entity (for
-/// `command` refs / display) and re-derived for `file_anchor`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum Resolution {
-    Resolved {
-        value: String,
-        outcome: Outcome,
-        resolved_ts: String,                 // RFC-3339, the display SSOT
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_excerpt: Option<String>,
-    },
-    Unresolved { reason: String },
-}
+**SC-5 — Anchor validation at store time + resolve surface (P1).**
+- `muster control add ... --ref-file $F --ref-anchor does.not.exist` is **refused**
+  with a non-zero exit and an error that names the fix (the path + the missing
+  anchor). No control is persisted on refusal (`control list` shows it absent).
+- `muster control resolve --all --output json` re-resolves every ref-backed
+  control and returns a list flagging any that are `Unresolved` (e.g. after a
+  source refactor). Single-id `muster control resolve C` still works.
 
-/// Pure staleness rule (#1). Epoch seconds in (cli owns the clock, C6); domain just
-/// compares. `freshness_secs == 0` ⇒ any cached resolution is immediately stale on the
-/// next read (deterministic test hook, SC-7).
-pub fn is_stale(resolved_epoch: i64, now_epoch: i64, freshness_secs: i64) -> bool {
-    now_epoch.saturating_sub(resolved_epoch) > freshness_secs
-}
+**SC-6 — No regression of the v1 ckeletin re-dogfood (read-only).**
+Against the real, untouched `/Users/peiman/dev/ckeletin-rust`:
+- `muster control add CK-ARCH --ref-file /Users/peiman/dev/ckeletin-rust/conformance-mapping.toml --ref-anchor <real CKSPEC anchor>` derives a title/status from the live source; honesty rule intact (cannot show green when source says fail). Read-only: muster never writes into ckeletin-rust.
+- The existing v1 import/N:M/honesty dogfood tests/fixtures still pass.
 
-/// The four honest display states surfaced in JSON (`resolution_state`).
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "resolution_state", rename_all = "snake_case")]
-pub enum Derived {
-    Derived  { value: String, outcome: Outcome, resolved_ts: String,
-               #[serde(skip_serializing_if = "Option::is_none")] source_excerpt: Option<String> },
-    Stale    { value: String, outcome: Outcome, resolved_ts: String },
-    Unresolved { reason: String },
-    Asserted, // no ref → hand-set, surfaced as "asserted (unverified)"
-}
-```
-
-### 2.2 Reference-backed Control / Check (additive fields on `model.rs`)
-
-```rust
-// On Control:
-#[serde(default, skip_serializing_if = "Option::is_none")]
-pub r#ref: Option<Ref>,
-#[serde(default, skip_serializing_if = "Option::is_none")]
-pub resolved: Option<Resolution>,           // cache of the last resolution
-#[serde(default, skip_serializing_if = "Vec::is_empty")]
-pub implementations: Vec<Implementation>,   // N:M (P1)
-
-// On Check: the same `ref` + `resolved` (no implementations on checks).
-
-/// One implementation of a control's requirement, with its own derived status (P1 N:M).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Implementation {
-    pub id: String,
-    pub r#ref: Ref,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved: Option<Resolution>,
-}
-```
-
-Pure projection methods (domain, fully unit-testable; cli supplies the freshly-attempted
-`Resolution` + `now_epoch` + `freshness_secs`):
-
-- `Control::project(now_epoch, freshness_secs) -> Derived` — uses `self.resolved` (and for
-  N:M, aggregates `implementations`). Honest aggregate: green-eligible only if the
-  control's own ref (if any) is `Derived` with `outcome != Fail` AND **every**
-  implementation projects to `Derived`+`Pass`. Any `Fail`/`Unresolved`/`Stale` ⇒ not green.
-- `Control::display_title() -> &str` — resolved value when `resolved` is `Resolved`, else
-  the stored `title` (fallback). Stored title is surfaced as `fallback_title`.
-- `Control::effective_status() -> ControlStatus` — when a ref/implementations are present,
-  derived (Pass ⇒ may be `Implemented`; Fail/Unresolved/Stale ⇒ forced **not**
-  `Implemented`). When no ref ⇒ the stored hand-set status (asserted).
-- `Check::effective_result() -> CheckResult` — ref-backed ⇒ the derived outcome
-  (`Pass→Pass`, `Fail→Fail`, `Unknown→Unknown`), **ignoring** any stored `last_result`
-  (closes the honesty hole, SC-5). No ref ⇒ stored `last_result` (v0 path).
-
-**Honesty rule, concretely (SC-5/SC-11):** a ref-backed control/check derives its
-status/result *on read*; the stored value is never the authority. A control can therefore
-never display `implemented`/green while its resolved source (or any linked check / any
-implementation) is `fail`/`unresolved`/`stale`.
-
-### 2.3 New infra module: `crates/infrastructure/src/resolver.rs` (I/O, NO domain dep — C2)
-
-Infra-local result structs (plain; they never cross the JSON surface — the cli maps them
-to `domain::Resolution`):
-
-```rust
-pub struct FileResolution {
-    pub value: Option<String>,   // None ⇒ anchor/file missing
-    pub reason: Option<String>,  // why unresolved (names path/anchor)
-    pub excerpt: Option<String>,
-}
-pub struct CommandResolution {
-    pub exit_code: Option<i32>,  // None ⇒ spawn failed
-    pub stdout_tail: String,
-    pub reason: Option<String>,
-}
-
-/// Read `path` (TOML if .toml, JSON if .json — by extension), walk the dotted `anchor`,
-/// return the scalar as a string. All fs errors → reason (never panic).
-pub fn resolve_file_anchor(path: &str, anchor: &str) -> FileResolution { ... }
-
-/// Run `cmd` in `dir`; capture exit + stdout tail. Spawn failure → reason.
-pub fn run_command(cmd: &str, dir: &str) -> CommandResolution { ... }
-```
-
-Implementation notes:
-- TOML via the `toml` crate, JSON via `serde_json` — both parsed to a generic `Value`,
-  then walk the dot-path (`requirements.CKSPEC-ARCH-001.title`). A scalar leaf
-  (string/int/bool) → its string form; a non-scalar/missing leaf → `value=None` + a
-  `reason` naming the missing segment. **Read-only** (open for read; never write).
-- `run_command`: `std::process::Command` (`sh -c <cmd>` in `dir`); exit 0 = pass, non-zero
-  = fail, spawn failure = unresolved. Bound captured stdout to a tail (e.g. last 512 bytes).
-- **Dependencies to add (C4):** `crates/infrastructure/Cargo.toml` `[dependencies]` gains
-  `serde_json = { workspace = true }` and `toml = { workspace = true }`; add
-  `toml = "0.8"` to root `Cargo.toml` `[workspace.dependencies]`; update
-  `ckeletin-project.toml` to `infrastructure = ["ckeletin", "serde_json", "toml"]` with a
-  justification comment per dep (resolver reads JSON/TOML result artifacts — disk boundary, #8).
-
-### 2.4 CLI bridge + new commands (`crates/cli`)
-
-The cli is the only place domain and infra meet. Add `cli/src/resolve.rs`:
-
-```rust
-// Given a domain::Ref, call the right infra resolver and build a domain::Resolution.
-fn resolve(r: &domain::Ref, now_iso: &str) -> domain::Resolution { ... }
-// file_anchor → resolve_file_anchor; map value→Outcome via domain::value_to_outcome.
-// command     → run_command; exit 0 ⇒ Pass, else Fail; spawn-fail ⇒ Unresolved.
-// note        → Resolved{value:text, outcome:Unknown} (asserted-only at projection).
-```
-
-Read-path policy (drives SC-3/SC-7):
-- **`file_anchor`** refs are re-resolved **live on every read** (`show`, `readiness`), the
-  cache is refreshed, `resolved_ts = now` ⇒ always fresh (SC-3: edits reflected).
-- **`command`** refs are **not** auto-run on plain reads; they serve `self.resolved` (the
-  cache) and are refreshed only by an explicit `muster control resolve <id>` /
-  `muster process check <pid> <cid> --resolve`. A served cache older than `freshness_secs`
-  projects to `Stale` (SC-7).
-- Freshness bound: `MUSTER_FRESHNESS_SECS` env (default `86400`); cli parses it and the
-  cached `resolved_ts` to epoch seconds (add `parse_iso_to_epoch` next to `now_iso` in
-  `cli/store.rs`, the inverse of `now_iso`) and calls `domain::is_stale`.
-
-New / extended command surface (clap in `root.rs`; handlers in `control.rs`, the check
-handler, plus a new `import.rs`):
-- `control add <id> --title <t> [--ref-file <path> --ref-anchor <anchor>] [--ref-cmd <cmd>
-  --ref-dir <dir>] [--ref-note <text>] [--clause-ref ..] [--applicable ..]` — at most one
-  ref kind; conflicting ref flags error (clap `conflicts_with`).
-- `control resolve <id>` — force re-resolution of the control's ref (refresh the cache).
-- `control add-implementation <id> --impl-id <iid> (--ref-file/--ref-anchor |
-  --ref-cmd/--ref-dir)` — append an `Implementation` (N:M).
-- `control import <manifest> [--format toml|json] [--prefix requirements] [--title-field
-  title]` — for each `requirements.<ID>` table, create control `slug(<ID>)` with
-  `ref: file_anchor{path:<manifest>, anchor:<prefix>.<ID>.<title-field>}`. IDs are
-  lowercased to satisfy the slug rule (`CKSPEC-ARCH-001 → ckspec-arch-001`).
-- `process check add <pid> --description <d> --enforcement <e> [--ref-file/--ref-anchor |
-  --ref-cmd/--ref-dir]` — ref-backed check.
-- `process check <pid> <cid> --pass|--fail` — for a **ref-backed** check this must NOT be
-  able to forge a green: **reject** with a new `DomainError::RefBacked { kind, id, fix }`
-  ("this check derives its result from its ref; fix the source, then re-resolve") — SC-5.
-
-Rendering: extend `Control`/`Check` `Display` and the JSON view to include `resolution`
-(`Derived`), `fallback_title`, `implementations[].resolution`, and the
-`asserted|derived|unresolved|stale` distinction. JSON stays a transparent projection
-(extend `WithNext`/view structs; no human-only strings in `data`, C5).
-
-### 2.5 Readiness becomes a true truth-meter (`crates/domain/src/readiness.rs`)
-
-The cli computes each control/check's `Derived` (it owns the clock + resolution) and passes
-it into `readiness`. Extend, do not rewrite:
-- Add a `readiness(store, scope, resolved_index)` signature where `resolved_index:
-  &BTreeMap<String, Derived>` is built by the cli (keeps domain clock-free; resolution
-  decisions — live vs cached, staleness — made once in cli).
-- Split control reporting into **derived** (ref-backed) vs **asserted** (no ref); surface
-  as `data.controls.derived` / `data.controls.asserted`.
-- `control_coverage`: a ref-backed control counts as implemented-with-evidence **only if**
-  it projects to `Derived` + `Pass` (fresh). `Unresolved`/`Stale`/derived-`Fail` ⇒ gap.
-- New `gap_findings` kinds: `ref_unresolved`, `ref_stale`, `ref_failing` (each names the
-  control/check + source + fix). Wire derived check `fail` through the existing
-  `refuting_signals`/`failed_check` path so the verdict is never green over a red source.
-- Evidence honesty (DoD bullet): for `EvidenceKind::File`, the cli stats the target and
-  passes a bool; readiness flags a `dangling_evidence` gap when absent. Keep minimal
-  (file-existence only).
+**SC-7 — P2 residuals (as completed).**
+- The decorative on-disk `resolved` cache is no longer authoritative: for
+  live-resolved refs (`file_anchor`, and `command` in default live mode) muster
+  does **not** persist a `resolved` copy that could be read as truth (SSOT #7);
+  if retained for opt-in cache mode it is schema-marked non-authoritative.
+- A cycle-safety test proves readiness traversal terminates when a ref-backed
+  control's graph forms a self/mutual reference (no infinite loop, deterministic
+  output).
+- (If built) a failing control sets a downward re-evaluation flag on dependent
+  processes, surfaced in `readiness`. If not built, it is explicitly listed in
+  Open Questions, not silently dropped.
 
 ---
 
-## 3. Implementation Checklist (ordered — each step ends green)
+## 2. Architecture (the approach)
 
-> TDD throughout (project rule): write the failing test first, watch it fail, implement,
-> watch it pass, keep `just check` green before moving on. Commit per step (conventional
-> commits; no `Co-Authored-By` trailer).
+### 2.1 P0a — Close the command drift window by making *live-on-read the default*
+**Decision (Manifesto #9 — structural over documented):** command refs
+re-resolve **live on read by default**, exactly like `file_anchor`. There is then
+no cache window in which a passed result can outlive reality. The opt-in cache is
+retained only behind an explicit switch for genuinely expensive checks; even then,
+past-freshness projects to `Stale` (already modeled) and the age is surfaced.
 
-1. **Domain types (no behavior change yet).** Add `crates/domain/src/reference.rs` with
-   `Ref`, `Outcome`, `value_to_outcome`, `Resolution`, `is_stale`, `Derived`. Unit-test
-   `value_to_outcome` (met/unmet/title/garbage) and `is_stale` (boundary, freshness=0).
-   Export from `lib.rs`. ⇒ `cargo test -p domain` green; `just check` green.
-2. **Additive fields + projection (domain).** Add `ref`, `resolved`, `implementations` to
-   `Control`; `ref`, `resolved` to `Check`; add `Implementation`. All `#[serde(default,
-   skip_serializing_if=...)]`. Add `display_title`, `effective_status`,
-   `effective_result`, `Control::project` (incl. N:M aggregate). Unit tests: honesty (ref
-   `fail` ⇒ not implemented even if stored `Implemented`); title fallback; N:M aggregate
-   (one fail ⇒ not green); **backward-compat round-trip** (no-ref control serializes
-   byte-identical to v0). ⇒ SC-2 partial, SC-5 (domain), SC-10 (domain).
-3. **Infra resolver.** Add `toml` to workspace deps; add `serde_json`+`toml` to infra
-   Cargo.toml + the allowlist (C4). Add `crates/infrastructure/src/resolver.rs`
-   (`resolve_file_anchor`, `run_command`) returning infra-local structs; export from
-   `lib.rs`. Tests (infra, `tempfile`): TOML leaf, JSON leaf, missing file, missing
-   anchor, non-scalar leaf, command exit 0 / non-zero / spawn-fail. Confirm
-   `arch_allowlist`/`infra_imports_domain` still pass. ⇒ `just check` green.
-4. **CLI bridge.** Add `cli/src/resolve.rs` (`resolve(&Ref, now) -> Resolution`) and
-   `parse_iso_to_epoch` in `cli/store.rs`. No new command yet; pure plumbing + a unit
-   test of the bridge mapping.
-5. **Control ref commands + rendering.** Extend `control add` with ref flags; add
-   `control resolve`; resolve on `show` (live for file_anchor, cached for command),
-   populate `Derived`, render both surfaces (`resolution`, `fallback_title`). Integration
-   tests in `muster.rs`: SC-3 (title derived + edit reflects), SC-6 (dangling ⇒
-   unresolved), SC-7 (command + `MUSTER_FRESHNESS_SECS=0` ⇒ stale).
-6. **Check ref commands + honesty enforcement.** Extend `process check add` with ref
-   flags; derive `last_result` on `process show`; make `process check --pass/--fail`
-   reject ref-backed checks (`DomainError::RefBacked`). Integration: SC-4, SC-5.
-7. **Readiness truth-meter.** Add the `resolved_index` param; split derived/asserted
-   controls; count unresolved/stale/failing as gaps; wire derived check fails into
-   refuting signals; add `ref_unresolved`/`ref_stale`/`ref_failing` gap kinds; optional
-   `dangling_evidence`. Update the `readiness.rs` cli handler to build the index.
-   Integration: SC-8. Keep all existing readiness tests passing.
-8. **N:M implementations.** `control add-implementation`; render per-impl resolution;
-   aggregate honesty in `project`. Integration: SC-10 (two impls, one met one unmet ⇒ not
-   green).
-9. **Reference-import.** New `cli/src/import.rs` + `control import` command; parse the
-   manifest (reuse the resolver's parse or a thin cli reader), create controls with
-   `file_anchor` refs (not copies). Integration: SC-9 (import temp 3-req TOML; edit a
-   title reflects).
-10. **ckeletin acceptance.** Integration test in `muster.rs`: copy
-    `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml` into a tempdir, flip one
-    `status` to `unmet`, point a control + check at it, assert derived title + refuses
-    green. Add one real read-only smoke against the actual path behind an env guard
-    (skips when absent) so CI stays offline-safe. ⇒ SC-11.
-11. **`explain` + `catalog` + docs.** Update `explain.rs` intents; ensure `catalog`
-    enumerates new commands/flags. Update module doc-comments to cite the Manifesto
-    principle each new piece serves (#7 on `Ref`, #8 on the bridge, #1 on `is_stale`).
-    Correct any now-false v0 statement in `AGENTS.md`/`README.md` (#10 honesty; do not
-    duplicate). ⇒ SC-12, SC-13.
-12. **Final gate.** `just check` green; re-read SPEC DoD 1–7 against SC-3..SC-11;
-    `cargo fmt --all`; confirm no `Co-Authored-By` trailer in commits.
+- `crates/cli/src/resolve.rs::project()` — for `Ref::Command`, when cache mode is
+  OFF (default), call `resolve(r, now)` live (mirror the `FileAnchor` arm) →
+  `served_from_cache = false`, `resolved_age_secs = 0`. When cache mode is ON,
+  serve `cached` as today (stale past freshness, age computed).
+- Cache mode switch: a new env constant `MUSTER_CMD_CACHE` in
+  `crates/cli/src/store.rs` (default `false`/`0`). Default off = honest. Document
+  it in code as opt-in for expensive commands only.
+- `resolved_age_secs` + `served_from_cache` become **first-class fields on the
+  `Derived` projection** (SSOT: computed once, rendered by both surfaces).
+
+### 2.2 Surfacing age: extend `domain::Derived`
+Add to `crates/domain/src/reference.rs`:
+- `Derived::Derived { …, resolved_age_secs: i64, served_from_cache: bool, source_age_secs: Option<i64> }`
+- `Derived::Stale { …, resolved_age_secs: i64, served_from_cache: bool }`
+(`Unresolved`/`Asserted` carry none — there is no resolved value.) These are
+`#[derive(Serialize)]` already, so JSON gains the fields automatically;
+`resolution_label()` in `control.rs` and the readiness renderer print them.
+`project()`/`derived_from()` compute the age = `now_epoch − resolved_epoch`
+(saturating ≥ 0) and pass the `cached` flag through. Update `outcome()` /
+`is_green_eligible()` matches and the in-file unit tests for the new fields.
+
+### 2.3 P0b — Make the safe path the easy path
+- **`--ref-report <PATH> <ANCHOR>`**: new flag on `RefFlags`
+  (`crates/cli/src/root.rs`) using `num_args = 2`,
+  `value_names = ["PATH", "ANCHOR"]`, mutually exclusive with `ref_cmd`/`ref_note`.
+  `RefFlags::to_ref()` maps it to `Ref::FileAnchor { path, anchor }` (it is sugar
+  for the zero-drift report path). One flag, no `--ref-anchor` pairing needed.
+- **Steering notice**: in `control.rs::execute` `ControlSub::Add`, when the built
+  ref is `Ref::Command`, attach a structured `steering_notice` string
+  ("`--ref-cmd` re-runs a command; prefer `--ref-report <artifact> <anchor>` when
+  the tool emits a result file — zero drift, no re-run."). Thread it into the add
+  view envelope so it renders in BOTH human and JSON.
+- **Ref-kind drift profile in readiness**: classify each ref-backed control into a
+  fixed enum (`live_resolved` | `cached_command` | `stale` | `unresolved` |
+  `asserted`) derived from its projected `Derived` + ref kind + cache mode.
+  Implement classification as a pure helper in
+  `crates/domain/src/reference.rs` (e.g. `fn drift_profile(ref, derived, cache_on) -> &'static str`)
+  so it is testable + SSOT. Surface per-control in `readiness` JSON and human
+  (a compact, deterministically-ordered "drift profile" section).
+
+### 2.4 P1 — Source-artifact age for `file_anchor`
+- `crates/infrastructure/src/resolver.rs::resolve_file_anchor()` already opens the
+  file; capture `fs::metadata(path).modified()` and return its epoch seconds in
+  `FileResolution` (new field `source_mtime_epoch: Option<i64>`). Infra returns
+  raw mtime; the cli computes age against `now` (domain stays clock-free).
+- `resolve.rs::resolve()` threads the mtime into `Derived::Derived.source_age_secs`
+  (computed vs `now`), surfaced in JSON + human for `file_anchor`. Optional
+  source-freshness bound (`MUSTER_SOURCE_FRESHNESS_SECS`, default 0 = off) that,
+  when set, flags the source stale in the `readiness` drift profile. The required
+  deliverable is the *visible age*; the enforced bound is stretch.
+
+### 2.5 P1 — Anchor validation + resolve --all
+- **Validate at store time**: in `ControlSub::Add` / `AddImplementation`, after
+  building a `file_anchor` ref, call `resolve()` once; if it returns
+  `Resolution::Unresolved`, return `Err` naming the fix (path + anchor + reason)
+  and do NOT persist. (Command refs: a non-zero exit is a legitimate *fail*, not a
+  store-time error — refuse only on a spawn failure / `Unresolved`.)
+- **`control resolve --all`**: add `all: bool` to `ControlSub::Resolve` and make
+  `id` optional; require exactly one of `--all` or `<id>` (else error naming
+  usage). When `--all`, iterate `s.list_controls()`, re-resolve each control + its
+  implementations, and emit a report listing every control with its resulting
+  `resolution_state`, flagging `unresolved` ones explicitly. Single-id behavior
+  unchanged.
+
+### 2.6 P2 — SSOT residual, cycle test, propagation
+- **Drop the decorative cache for live refs**: in `control.rs`, stop calling
+  `set_control_resolution` / `set_implementation_resolution` for refs that resolve
+  live (`file_anchor`, and `command` in default live mode). Persist a cached
+  `resolved` ONLY when `MUSTER_CMD_CACHE` is on (the only mode that reads it). If
+  the field stays on the struct for that mode, doc-comment it explicitly
+  non-authoritative. This removes the stored copy of source text that #7 forbids
+  being treated as truth.
+- **Cycle-safety test**: add a test building a ref-backed control graph with a
+  self/mutual reference and assert `readiness` terminates with deterministic
+  output (extends `detect_cycles` coverage in `crates/domain/src/store.rs`).
+- **Downward propagation (best-effort, P2)**: if time permits, a failing
+  (`outcome == Fail` / `Unresolved`) control sets a re-evaluation flag on
+  processes that link it, surfaced in `readiness` as a `flagged_for_reeval` list.
+  If not built this iteration, record it in `.omc/plans/open-questions.md` and
+  note it in SC-7 — do not silently drop.
+
+### 2.6b Manifesto mapping (the validator grades this)
+- **#9** the default command path is live-resolved → drift is *structurally*
+  impossible, not merely warned about; `--ref-report` makes the safe path one flag.
+- **#7** no authoritative stored copy: cache dropped for live refs; age fields are
+  computed from the live source, never trusted from disk.
+- **#1** every projection carries `resolved_age_secs` + `source_age_secs` so the
+  evidence (freshness) is visible.
+- **#10** this whole v2 exists because the v1 re-dogfood refuted "honesty is
+  complete" — keep the SPEC↔impl feedback honest.
+
+---
+
+## 3. Implementation Checklist (ordered — Executor follows exactly)
+
+> TDD: for each step write/adjust the failing test first, then implement, then
+> `just check`. Atomic, conventional commits (`feat:`/`fix:`/`test:`). Every
+> commit must pass `just check`. Domain stays I/O-free.
+
+**3.1 — Age fields on the projection (foundation for everything).**
+- `crates/domain/src/reference.rs`: add `resolved_age_secs: i64`,
+  `served_from_cache: bool` to `Derived::Derived` and `Derived::Stale`, and
+  `source_age_secs: Option<i64>` to `Derived::Derived`. Update
+  `outcome()`/`is_green_eligible()` matches; add a pure `drift_profile(...)` helper
+  + unit tests; fix the in-file unit tests that construct these variants.
+- `crates/cli/src/resolve.rs`: compute age in `derived_from()` (`now_epoch −
+  resolved_epoch`, saturating) and pass `served_from_cache = cached`. Update the
+  in-file unit tests (they construct `Derived::Derived`/`Stale`).
+
+**3.2 — Command refs resolve live by default (P0a, the drift fix).**
+- Add `MUSTER_CMD_CACHE` env + `cmd_cache_enabled()` to `crates/cli/src/store.rs`.
+- In `resolve.rs::project()`, branch the `Ref::Command` arm on `cmd_cache_enabled`:
+  default → live `resolve(r, now)` (age 0, not cached); cache-on → existing
+  cached/stale path. Thread the cache flag through `project`'s callers
+  (`ControlView::build`, readiness index, check baking).
+- Re-home the resolve.rs unit tests `command_without_cache_is_unresolved` and
+  `command_cache_goes_stale_at_freshness_zero` to **cache-mode** behavior; add a
+  new default-mode test asserting a command ref re-resolves live (age 0,
+  `served_from_cache=false`).
+
+**3.3 — `--ref-report` sugar + steering notice (P0b).**
+- `root.rs`: add `ref_report: Option<Vec<String>>` to `RefFlags`
+  (`num_args = 2`, `value_names = ["PATH","ANCHOR"]`, conflicts with
+  `ref_cmd`/`ref_note`). Map to `Ref::FileAnchor` in `to_ref()`.
+- `control.rs` `Add`: if the ref is `Ref::Command`, build a `steering_notice` and
+  include it in the add envelope (new optional field on the add view / wrapper) so
+  both surfaces render it.
+
+**3.4 — Anchor validation at store time + age surfacing for file_anchor (P1).**
+- `infrastructure/src/resolver.rs`: capture source mtime epoch in
+  `resolve_file_anchor` → new `FileResolution.source_mtime_epoch`.
+- `resolve.rs::resolve()`: thread mtime into `Derived::Derived.source_age_secs`
+  (vs `now`); surface in `ControlView`/`ImplView` render + JSON.
+- `control.rs` `Add`/`AddImplementation`: for `file_anchor`/`--ref-report`, resolve
+  once and refuse (`Err`, no persist) when `Unresolved`, naming the fix.
+
+**3.5 — `control resolve --all` (P1).**
+- `root.rs`: `ControlSub::Resolve { id: Option<String>, all: bool }`.
+- `control.rs`: when `--all`, iterate all controls, re-resolve, emit a report
+  (vector of `{id, resolution_state, unresolved?}`), flag `unresolved`. Validate
+  exactly one of `id`/`--all` (else error naming usage).
+
+**3.6 — Readiness drift profile (P0b) + cycle-safety test (P2).**
+- `cli/src/readiness.rs`: for each ref-backed control compute `drift_profile`
+  (domain helper) from its projected `Derived` + ref kind + cache mode; add to the
+  readiness view (JSON + human), deterministic ordering.
+- Add the cycle-safety integration test (ref-backed self/mutual reference →
+  readiness terminates, deterministic).
+
+**3.7 — P2 SSOT cleanup + regression sweep.**
+- Stop persisting `resolved` for live refs in `control.rs` (`Add`,
+  `AddImplementation`, `Resolve`); persist only when `MUSTER_CMD_CACHE` on. If the
+  struct field stays, doc-comment it non-authoritative.
+- Update any v0/v1 test that assumed a persisted `resolved` for live refs to
+  assert the live projection instead. Run full `just check`.
+- (Optional, time-boxed) downward propagation flag in readiness; else log to
+  `.omc/plans/open-questions.md`.
+
+**3.8 — Dogfood + DoD verification (evidence pass, no new behavior).**
+- Run the SC-1 drift sequence end-to-end via `--output json`; capture before/after.
+- Re-run the v1 ckeletin re-dogfood read-only against
+  `/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml` (never write there).
+- Confirm `just check` green; confirm dual-surface parity on every new field.
 
 ---
 
 ## 4. Testing Strategy
 
-- **Domain unit tests (pure, fast, deterministic):** `value_to_outcome`, `is_stale` (incl.
-  `freshness_secs=0`), `effective_status`/`effective_result` honesty (stored `Implemented`
-  + derived `Fail` ⇒ not implemented), `display_title` fallback, N:M aggregate, and a
-  **serde backward-compat** test (deserialize a v0 control JSON literal with no `ref`;
-  re-serialize; assert no `ref`/`resolved`/`implementations` keys appear).
-- **Infra tests (`tempfile`):** file_anchor over TOML and JSON happy paths; missing file,
-  missing/nested-missing anchor, non-scalar leaf (each yields a `reason`, never panics);
-  `run_command` exit 0/non-zero/spawn-failure. The `print_stdout/print_stderr=deny` lint
-  enforces no infra console output at clippy time.
-- **CLI integration (`assert_cmd`, isolated `MUSTER_DATA_DIR`, both surfaces)** — mirror
-  the existing `muster.rs` style (the `data(dir, args)` helper that asserts
-  `status=="success"` and returns `data`). One test per SC-3..SC-11, each asserting on
-  `--output json` `data` fields so a cold agent can verify. Use temp source files for
-  determinism; SC-7 sets `MUSTER_FRESHNESS_SECS=0`; SC-11 uses a flipped temp copy of the
-  real ckeletin manifest plus an env-guarded read-only smoke.
-- **Regression:** run the full pre-existing `muster.rs`/`cli.rs` suites unmodified; any
-  change to an existing assertion must be justified as additive, not a weakening.
-- **Enforcement (#9):** `arch_allowlist`, `infra_imports_domain`, all violation trybuild
-  tests, `ckeletin-check`, and `ckeletin-health` are the automated guard that the layer
-  split held — they run inside `just check` and gate every step.
-- **Coverage:** keep `just coverage` ≥ 85% (the new domain projection + infra resolver are
-  the highest-value lines to cover; the cli bridge is covered by the integration SCs).
+**Unit (domain, I/O-free):**
+- `reference.rs`: new `Derived` fields in `outcome()`/`is_green_eligible()`;
+  `drift_profile()` mapping for each (ref kind × Derived state); `is_stale`
+  boundary unchanged.
+- `resolve.rs`: `derived_from` age computation (age 0 live; positive when cached;
+  saturating on clock skew); command-ref default = live; cache-mode = served/stale.
+
+**Integration (`crates/cli/tests/muster.rs`, via `data()`/`init()`/`write_src()`):**
+- **SC-1 drift, the headline test**: create `--ref-cmd "test -f <guard>"`; assert
+  green + `resolved_age_secs==0`, `served_from_cache==false`; delete guard;
+  re-`show` with no resolve; assert NOT green + `outcome=="fail"` + age shown.
+- **SC-2**: assert `resolved_age_secs`/`served_from_cache` present in JSON and in
+  the human render for a ref-backed control.
+- **SC-3**: `--ref-report PATH ANCHOR` creates a derived `file_anchor` control in
+  one flag; `--ref-cmd` add returns `steering_notice` (JSON + human);
+  `readiness` JSON carries `drift_profile` per control from the fixed set.
+- **SC-4**: write a source file, point a `file_anchor` at it, assert
+  `source_age_secs` ~0; (optionally) back-date mtime and assert it grows.
+- **SC-5**: add with a bad anchor → non-zero exit, error names path+anchor, no
+  control persisted (`control list` absent); `control resolve --all` lists states
+  and flags an anchor gone `unresolved` after rewriting the source file.
+- **SC-7**: cycle-safety test (self/mutual ref-backed control → readiness
+  terminates deterministically); assert default mode does not read a `resolved`
+  cache as authority.
+
+**Regression / gate:**
+- Full `just check` (ckeletin-check + nextest workspace + ckeletin-health) green.
+- Coverage stays ≥ 85% (`just coverage`); add tests for every new branch.
+- Existing v0/v1 tests pass; the two resolve.rs cache tests are *re-homed* to
+  cache-mode (intentional behavior change, re-asserted), not deleted.
+- Dual-surface invariant: for each new field, a test asserts it appears in JSON
+  AND is rendered in text (no human-only or json-only data).
+
+**Manifesto-alignment checks (validator grades):**
+- #9: a test proving the default command path cannot show green over a deleted
+  guard *without* any resolve call (SC-1) — enforcement is structural.
+- #7: a test proving live refs do not rely on a persisted `resolved` copy.
+- #1: every derived projection exposes `resolved_age_secs` (+ `source_age_secs`
+  for file_anchor).
 
 ---
 
-## 5. Manifesto application (graded — SC-12)
-
-- **#7 Single Source of Truth** — `Ref` stores a *pointer*; title/status are resolved on
-  read from the source. muster never copies the source's value into its own ledger
-  (SC-3/SC-9 prove an external edit changes muster's output with no muster mutation).
-- **#10 Feedback Cycle** — v1 *is* the spec evolving: v0's "recorder" hypothesis was
-  refuted by the ckeletin dogfood; v1 inverts to resolve-on-read. The honest `asserted vs
-  derived` split keeps muster honest about its own glue thesis.
-- **#1 Truth-Seeking / #3 Honest signals** — `Unresolved`/`Stale` are surfaced, never
-  silently green; every error names the offending path/anchor and the fix.
-- **#8 Separation of Concerns** — pure `Ref`/`Resolution`/projection in domain; fs/process
-  I/O in infrastructure (which cannot even see domain); cli bridges. Compiler/test enforced.
-- **#9 Automated Enforcement** — the honesty rule is enforced by `effective_*` deriving on
-  read (not by convention), and the layer split by the allowlist + trybuild tests.
-- **#4 Lean Iteration / out-of-scope discipline** — exactly the P0+P1 organs, two resolver
-  kinds, no network/`url`, no LLM, no UI, no re-implementation of ckeletin's engine.
+## 5. Open questions (mirror to `.omc/plans/open-questions.md`)
+- **Validation severity for bad anchors**: refuse (chosen — fail-closed, #9) vs
+  warn-and-persist. Plan chooses *refuse*; could add `--allow-dangling` opt-out
+  later if it blocks legitimate point-then-create-source workflows.
+- **Downward propagation (P2)**: built this iteration only if time remains after
+  P0/P1; otherwise deferred and tracked here, not silently dropped.
+- **Source-freshness bound** (`MUSTER_SOURCE_FRESHNESS_SECS`): ship the *visible
+  age* (required); the optional enforced bound is stretch.
 
 ```json
-{"rationale": "A v1 plan that inverts muster from recorder to glue via a pure domain Ref/Resolution + projection, an infra resolver that (forced by the no-domain-dep rule) returns infra-local results bridged in cli, derived honest control/check status with Unresolved/Stale states, N:M implementations, reference-import, and a read-only ckeletin acceptance — each SC mechanically verifiable with just check kept green.", "evidence": {"files": ["PLAN.md"]}}
+{"rationale": "Plan closes the command-ref drift window structurally by making command refs resolve live-on-read by default (Manifesto #9), surfaces resolved/source age in both human and JSON surfaces, and adds --ref-report sugar, a steering notice, a readiness drift profile, store-time anchor validation, and control resolve --all, with file-grounded ordered steps and DoD-mapped, mechanically verifiable success criteria.", "evidence": {"files": ["PLAN.md"]}}
 ```

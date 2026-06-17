@@ -177,8 +177,12 @@ fn check(args: CheckArgs, dir: &std::path::Path, output: &Output) -> Boxed {
         let check_id = s.add_check(&id, &description, enforcement)?;
         let next = if let Some(r) = r {
             s.set_check_ref(&id, &check_id, r.clone())?;
-            let res = resolve::resolve(&r, &store::now_iso());
-            s.set_check_resolution(&id, &check_id, res)?;
+            // #7 SSOT: persist a cached resolution only in opt-in command-cache
+            // mode; otherwise the check re-resolves live on read (no stale green).
+            if store::cmd_cache_enabled() && r.is_cached_kind() {
+                let res = resolve::resolve(&r, &store::now_iso());
+                s.set_check_resolution(&id, &check_id, res)?;
+            }
             // A ref-backed check derives its result; it cannot be hand-set.
             format!("muster process check {id} {check_id} --resolve")
         } else {
@@ -200,7 +204,6 @@ fn check(args: CheckArgs, dir: &std::path::Path, output: &Output) -> Boxed {
     // Resolve form: re-run the check's ref and refresh its cache.
     if args.resolve {
         let mut s = store::load(dir)?;
-        let now = store::now_iso();
         let p = s.process(&id)?;
         let c = p
             .checks
@@ -211,8 +214,12 @@ fn check(args: CheckArgs, dir: &std::path::Path, output: &Output) -> Boxed {
             .r#ref
             .clone()
             .ok_or_else(|| format!("check '{check_id}' has no ref to resolve"))?;
-        let res = resolve::resolve(&r, &now);
-        s.set_check_resolution(&id, &check_id, res)?;
+        // #7 SSOT: only opt-in command-cache mode keeps a stored copy; live refs
+        // re-resolve on read so the refreshed view below is already authoritative.
+        if store::cmd_cache_enabled() && r.is_cached_kind() {
+            let res = resolve::resolve(&r, &store::now_iso());
+            s.set_check_resolution(&id, &check_id, res)?;
+        }
         store::save(dir, &s)?;
         let p = s.process(&id)?;
         return render(output, "process check", p, "muster readiness".to_string());
@@ -261,12 +268,14 @@ impl ProcessShow {
     fn build(p: &Process) -> ProcessShow {
         let now = store::now_iso();
         let fresh = store::freshness_secs();
+        let cmd_cache = store::cmd_cache_enabled();
 
         // A clone whose ref-backed checks show their derived result (human surface).
         let mut display_clone = p.clone();
         for c in &mut display_clone.checks {
             if c.is_ref_backed() {
-                let derived = resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh);
+                let derived =
+                    resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh, cmd_cache);
                 c.last_result = c.effective_result(Some(&derived));
             }
         }
@@ -276,8 +285,13 @@ impl ProcessShow {
         if let Some(arr) = json.get_mut("checks").and_then(|v| v.as_array_mut()) {
             for (cv, c) in arr.iter_mut().zip(p.checks.iter()) {
                 if c.is_ref_backed() {
-                    let derived =
-                        resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh);
+                    let derived = resolve::project(
+                        c.r#ref.as_ref(),
+                        c.resolved.as_ref(),
+                        &now,
+                        fresh,
+                        cmd_cache,
+                    );
                     if let Ok(rv) = serde_json::to_value(&derived)
                         && let Some(obj) = cv.as_object_mut()
                     {

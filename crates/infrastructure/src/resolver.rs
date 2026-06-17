@@ -20,6 +20,10 @@ pub struct FileResolution {
     pub reason: Option<String>,
     /// A short excerpt of the source for display, when available.
     pub excerpt: Option<String>,
+    /// The source file's mtime in epoch seconds, when the file could be read
+    /// (#1 — muster's truth is only as fresh as the artifact it points at). The
+    /// cli computes the *age* against its clock; infra returns raw mtime only.
+    pub source_mtime_epoch: Option<i64>,
 }
 
 /// The result of running a command. Infra-local.
@@ -45,6 +49,7 @@ pub fn resolve_file_anchor(path: &str, anchor: &str) -> FileResolution {
             return unresolved_file(format!("cannot read file '{path}': {e}"));
         }
     };
+    let source_mtime_epoch = source_mtime_epoch(path);
     let value: TomlOrJson = if path.ends_with(".json") {
         match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => TomlOrJson::Json(v),
@@ -63,6 +68,7 @@ pub fn resolve_file_anchor(path: &str, anchor: &str) -> FileResolution {
             excerpt: Some(truncate(&s, 120)),
             value: Some(s),
             reason: None,
+            source_mtime_epoch,
         },
         Walked::MissingSegment(seg) => unresolved_file(format!(
             "anchor '{anchor}' not found in '{path}' (missing segment '{seg}')"
@@ -73,11 +79,23 @@ pub fn resolve_file_anchor(path: &str, anchor: &str) -> FileResolution {
     }
 }
 
+/// The mtime of `path` in epoch seconds, or `None` when the metadata/mtime is
+/// unavailable (e.g. platform without mtime). Read-only.
+fn source_mtime_epoch(path: &str) -> Option<i64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let secs = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    i64::try_from(secs).ok()
+}
+
 fn unresolved_file(reason: String) -> FileResolution {
     FileResolution {
         value: None,
         reason: Some(reason),
         excerpt: None,
+        source_mtime_epoch: None,
     }
 }
 

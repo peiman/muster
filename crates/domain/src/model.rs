@@ -783,6 +783,9 @@ mod tests {
             outcome: Outcome::Pass,
             resolved_ts: "2026-01-01T00:00:00Z".into(),
             source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: None,
         }
     }
     fn derived_fail(value: &str) -> Derived {
@@ -791,6 +794,9 @@ mod tests {
             outcome: Outcome::Fail,
             resolved_ts: "2026-01-01T00:00:00Z".into(),
             source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: None,
         }
     }
 
@@ -806,6 +812,9 @@ mod tests {
             outcome: Outcome::Unknown,
             resolved_ts: "t".into(),
             source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: None,
         };
         assert_eq!(c.display_title(Some(&d)), "Alpha");
         // No resolution available ⇒ fall back to stored title.

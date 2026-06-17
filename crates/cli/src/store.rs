@@ -14,6 +14,13 @@ const ENV_DATA_DIR: &str = "MUSTER_DATA_DIR";
 const DEFAULT_DATA_DIR: &str = "./.muster";
 const ENV_FRESHNESS: &str = "MUSTER_FRESHNESS_SECS";
 const DEFAULT_FRESHNESS_SECS: i64 = 86_400;
+/// Opt-in: serve a *cached* command-ref verdict instead of re-running it live.
+/// Default OFF — the honest default re-resolves command refs live on every read
+/// (Manifesto #9: a stale verdict is *structurally* unable to show green; there
+/// is no cache window for it to outlive reality). Turn this on ONLY for genuinely
+/// expensive commands, accepting that the verdict goes `Stale` past the freshness
+/// bound and the resolved age is always surfaced.
+const ENV_CMD_CACHE: &str = "MUSTER_CMD_CACHE";
 const MANIFEST: &str = "manifest.json";
 const SCHEMA_VERSION: u32 = 1;
 
@@ -191,6 +198,19 @@ pub fn freshness_secs() -> i64 {
     match std::env::var(ENV_FRESHNESS) {
         Ok(v) => v.trim().parse::<i64>().unwrap_or(DEFAULT_FRESHNESS_SECS),
         Err(_) => DEFAULT_FRESHNESS_SECS,
+    }
+}
+
+/// Whether command refs serve a cached verdict (opt-in, default OFF). When off
+/// (the honest default), command refs re-resolve live on read — no drift window.
+/// Accepts `1`/`true`/`yes`/`on` (case-insensitive) as enabling values.
+pub fn cmd_cache_enabled() -> bool {
+    match std::env::var(ENV_CMD_CACHE) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
     }
 }
 

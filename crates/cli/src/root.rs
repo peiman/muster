@@ -10,26 +10,49 @@ use domain::{
 #[derive(Args, Debug, Clone)]
 pub struct RefFlags {
     /// file_anchor: path to a TOML/JSON source file
-    #[arg(long = "ref-file", requires = "ref_anchor", conflicts_with_all = ["ref_cmd", "ref_note"])]
+    #[arg(long = "ref-file", requires = "ref_anchor", conflicts_with_all = ["ref_cmd", "ref_note", "ref_report"])]
     pub ref_file: Option<String>,
     /// file_anchor: dotted anchor of the scalar to read (e.g. requirements.R1.title)
     #[arg(long = "ref-anchor")]
     pub ref_anchor: Option<String>,
     /// command: a command whose exit code is the pass/fail signal
-    #[arg(long = "ref-cmd", requires = "ref_dir", conflicts_with_all = ["ref_file", "ref_note"])]
+    #[arg(long = "ref-cmd", requires = "ref_dir", conflicts_with_all = ["ref_file", "ref_note", "ref_report"])]
     pub ref_cmd: Option<String>,
     /// command: the directory to run `--ref-cmd` in
     #[arg(long = "ref-dir")]
     pub ref_dir: Option<String>,
     /// note: an opaque manual reference (always surfaced as asserted/unverified)
-    #[arg(long = "ref-note", conflicts_with_all = ["ref_file", "ref_cmd"])]
+    #[arg(long = "ref-note", conflicts_with_all = ["ref_file", "ref_cmd", "ref_report"])]
     pub ref_note: Option<String>,
+    /// file_anchor SUGAR (the zero-drift safe path): point at a result artifact a
+    /// tool already produces — `--ref-report <PATH> <ANCHOR>` is exactly a
+    /// `file_anchor` (no `--ref-anchor` pairing). Prefer this over `--ref-cmd`:
+    /// reading a result file has no drift window; re-running a command does.
+    #[arg(
+        long = "ref-report",
+        num_args = 2,
+        value_names = ["PATH", "ANCHOR"],
+        conflicts_with_all = ["ref_file", "ref_cmd", "ref_note"]
+    )]
+    pub ref_report: Option<Vec<String>>,
 }
 
 impl RefFlags {
     /// Build the `Ref` these flags describe, or `None` when no ref kind was given.
     /// Returns `Err` only on a half-specified file/command pair clap can't catch.
     pub fn to_ref(&self) -> Result<Option<Ref>, String> {
+        if let Some(report) = &self.ref_report {
+            // clap's `num_args = 2` guarantees exactly two values when present.
+            let path = report
+                .first()
+                .ok_or("--ref-report requires <PATH> <ANCHOR>")?
+                .clone();
+            let anchor = report
+                .get(1)
+                .ok_or("--ref-report requires <PATH> <ANCHOR>")?
+                .clone();
+            return Ok(Some(Ref::FileAnchor { path, anchor }));
+        }
         if let Some(path) = &self.ref_file {
             let anchor = self
                 .ref_anchor
@@ -307,8 +330,16 @@ pub enum ControlSub {
         kind: EvidenceKind,
         value: String,
     },
-    /// Re-resolve a control's ref (refresh the cached resolution)
-    Resolve { id: String },
+    /// Re-resolve a control's ref (refresh the cached resolution). Pass `--all` to
+    /// re-resolve every ref-backed control and flag any that silently went
+    /// `Unresolved` after a source refactor (the doctor surface).
+    Resolve {
+        /// The control id to re-resolve (omit when using `--all`)
+        id: Option<String>,
+        /// Re-resolve every ref-backed control + implementation
+        #[arg(long)]
+        all: bool,
+    },
     /// Link an implementation (N:M) — point it at its own source (#7)
     AddImplementation {
         id: String,

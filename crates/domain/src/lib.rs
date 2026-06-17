@@ -15,5 +15,7 @@ pub use model::{
     NonconformityStatus, Process, ProcessStatus, Revision, Severity, Step, validate_slug,
 };
 pub use readiness::{ControlsSplit, Readiness, readiness, readiness_with};
-pub use reference::{Derived, Outcome, Ref, Resolution, is_stale, value_to_outcome};
+pub use reference::{
+    Derived, Outcome, Ref, Resolution, drift_profile, is_stale, value_to_outcome,
+};
 pub use store::{Store, SubNode, TreeStep, TreeView};
