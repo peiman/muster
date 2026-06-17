@@ -6,12 +6,14 @@
 pub mod model;
 pub mod ping;
 pub mod readiness;
+pub mod reference;
 pub mod store;
 
 pub use model::{
     Check, CheckResult, Control, ControlStatus, DomainError, Enforcement, Evidence, EvidenceKind,
-    Incident, IncidentStatus, LogEntry, Nonconformity, NonconformitySource, NonconformityStatus,
-    Process, ProcessStatus, Revision, Severity, Step, validate_slug,
+    Implementation, Incident, IncidentStatus, LogEntry, Nonconformity, NonconformitySource,
+    NonconformityStatus, Process, ProcessStatus, Revision, Severity, Step, validate_slug,
 };
 pub use readiness::{Readiness, readiness};
+pub use reference::{Derived, Outcome, Ref, Resolution, is_stale, value_to_outcome};
 pub use store::{Store, SubNode, TreeStep, TreeView};

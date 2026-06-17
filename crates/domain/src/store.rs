@@ -7,6 +7,7 @@
 //! iteration id-sorted → deterministic output an agent can diff (#7, AX).
 
 use crate::model::*;
+use crate::reference::{Ref, Resolution};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -198,6 +199,8 @@ impl Store {
             last_result: CheckResult::Unknown,
             last_run_ts: None,
             evidence: Vec::new(),
+            r#ref: None,
+            resolved: None,
         });
         Ok(id)
     }
@@ -226,6 +229,15 @@ impl Store {
                     "list checks with: muster process show <id>",
                 )
             })?;
+        // Honesty rule (SC-5): a reference-backed check derives its result from
+        // its source on read — it can NEVER be hand-set to forge a green.
+        if check.is_ref_backed() {
+            return Err(DomainError::RefBacked {
+                kind: "check",
+                id: check_id.to_string(),
+                fix: "this check derives its result from its ref; fix the source, then re-resolve with: muster process check <pid> <check-id> --resolve".to_string(),
+            });
+        }
         check.last_result = result;
         check.last_run_ts = Some(ts.to_string());
         if let Some(e) = evidence {
@@ -299,6 +311,9 @@ impl Store {
                 applicable,
                 status: ControlStatus::default(),
                 evidence: Vec::new(),
+                r#ref: None,
+                resolved: None,
+                implementations: Vec::new(),
             },
         );
         Ok(())
@@ -328,6 +343,117 @@ impl Store {
             .ok_or_else(|| DomainError::nf("control", id, ADD_CONTROL_FIX))?;
         c.evidence.push(evidence);
         Ok(())
+    }
+
+    // ── v1 glue: reference-backed control / check mutators ─────────────────────
+
+    /// Point a control at an authoritative source (#7). Title/status become
+    /// derived on read.
+    pub fn set_control_ref(&mut self, id: &str, r: Ref) -> Result<(), DomainError> {
+        let c = self
+            .controls
+            .get_mut(id)
+            .ok_or_else(|| DomainError::nf("control", id, ADD_CONTROL_FIX))?;
+        c.r#ref = Some(r);
+        Ok(())
+    }
+
+    /// Cache the last resolution of a control's ref (the cli computes it; domain
+    /// stays I/O- and clock-free, #8).
+    pub fn set_control_resolution(
+        &mut self,
+        id: &str,
+        resolution: Resolution,
+    ) -> Result<(), DomainError> {
+        let c = self
+            .controls
+            .get_mut(id)
+            .ok_or_else(|| DomainError::nf("control", id, ADD_CONTROL_FIX))?;
+        c.resolved = Some(resolution);
+        Ok(())
+    }
+
+    /// Append an implementation to a control (N:M, P1). Each implementation
+    /// derives its own status from its own ref.
+    pub fn add_implementation(
+        &mut self,
+        cid: &str,
+        impl_id: &str,
+        r: Ref,
+    ) -> Result<(), DomainError> {
+        validate_slug(impl_id)?;
+        let c = self
+            .controls
+            .get_mut(cid)
+            .ok_or_else(|| DomainError::nf("control", cid, ADD_CONTROL_FIX))?;
+        if c.implementations.iter().any(|i| i.id == impl_id) {
+            return Err(DomainError::DuplicateId {
+                kind: "implementation",
+                id: impl_id.to_string(),
+            });
+        }
+        c.implementations.push(Implementation {
+            id: impl_id.to_string(),
+            r#ref: r,
+            resolved: None,
+        });
+        Ok(())
+    }
+
+    /// Cache the last resolution of one implementation's ref.
+    pub fn set_implementation_resolution(
+        &mut self,
+        cid: &str,
+        impl_id: &str,
+        resolution: Resolution,
+    ) -> Result<(), DomainError> {
+        let c = self
+            .controls
+            .get_mut(cid)
+            .ok_or_else(|| DomainError::nf("control", cid, ADD_CONTROL_FIX))?;
+        let im = c
+            .implementations
+            .iter_mut()
+            .find(|i| i.id == impl_id)
+            .ok_or_else(|| {
+                DomainError::nf(
+                    "implementation",
+                    impl_id,
+                    "list implementations with: muster control show <id>",
+                )
+            })?;
+        im.resolved = Some(resolution);
+        Ok(())
+    }
+
+    /// Point a check at an authoritative source (#7). `last_result` becomes
+    /// derived on read; the honesty rule then forbids hand-setting it.
+    pub fn set_check_ref(&mut self, pid: &str, cid: &str, r: Ref) -> Result<(), DomainError> {
+        let check = self.check_mut(pid, cid)?;
+        check.r#ref = Some(r);
+        Ok(())
+    }
+
+    /// Cache the last resolution of a check's ref.
+    pub fn set_check_resolution(
+        &mut self,
+        pid: &str,
+        cid: &str,
+        resolution: Resolution,
+    ) -> Result<(), DomainError> {
+        let check = self.check_mut(pid, cid)?;
+        check.resolved = Some(resolution);
+        Ok(())
+    }
+
+    fn check_mut(&mut self, pid: &str, cid: &str) -> Result<&mut Check, DomainError> {
+        let p = self
+            .processes
+            .get_mut(pid)
+            .ok_or_else(|| DomainError::nf("process", pid, ADD_PROCESS_FIX))?;
+        p.checks.iter_mut().find(|c| c.id == cid).ok_or_else(|| {
+            DomainError::nf("check", cid, "list checks with: muster process show <id>")
+        })
     }
 
     // ── incident mutators ────────────────────────────────────────────────────
@@ -758,6 +884,42 @@ mod tests {
         );
         // unknown cause rejected
         assert!(s.revise("p1", "x", Some("ghost".into()), "t").is_err());
+    }
+
+    #[test]
+    fn ingest_check_rejects_ref_backed_check() {
+        let mut s = store_with(&["p1"]);
+        let cid = s.add_check("p1", "d", Enforcement::Ci).unwrap();
+        s.set_check_ref(
+            "p1",
+            &cid,
+            Ref::FileAnchor {
+                path: "x.toml".into(),
+                anchor: "a.status".into(),
+            },
+        )
+        .unwrap();
+        let err = s
+            .ingest_check("p1", &cid, CheckResult::Pass, "t", None)
+            .unwrap_err();
+        assert!(matches!(err, DomainError::RefBacked { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn add_implementation_validates_and_dedups() {
+        let mut s = store_with(&["p1"]);
+        s.add_control("c1", "C", None, true).unwrap();
+        s.add_implementation("c1", "rust", Ref::Note { text: "x".into() })
+            .unwrap();
+        assert!(matches!(
+            s.add_implementation("c1", "rust", Ref::Note { text: "y".into() }),
+            Err(DomainError::DuplicateId { .. })
+        ));
+        assert!(matches!(
+            s.add_implementation("c1", "Bad Id", Ref::Note { text: "z".into() }),
+            Err(DomainError::InvalidSlug(_))
+        ));
+        assert_eq!(s.control("c1").unwrap().implementations.len(), 1);
     }
 
     #[test]

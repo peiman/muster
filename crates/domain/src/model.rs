@@ -6,6 +6,7 @@
 //! implements `Display` (the human surface) so text and JSON tell the *same*
 //! story from one source.
 
+use crate::reference::{Derived, Outcome, Ref, Resolution};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -43,6 +44,13 @@ pub enum DomainError {
 
     #[error("a conformance result must be exactly one of --pass or --fail (got {0})")]
     AmbiguousResult(&'static str),
+
+    #[error("{kind} '{id}' is reference-backed — {fix}")]
+    RefBacked {
+        kind: &'static str,
+        id: String,
+        fix: String,
+    },
 }
 
 impl DomainError {
@@ -270,6 +278,39 @@ pub struct Check {
     pub last_run_ts: Option<String>,
     #[serde(default)]
     pub evidence: Vec<Evidence>,
+    /// v1 glue: a typed pointer to the authoritative source (#7). When present,
+    /// `last_result` is DERIVED on read by resolving the ref — never hand-set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Ref>,
+    /// Cache of the last resolution (for display / `command`-kind refs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<Resolution>,
+}
+
+impl Check {
+    /// `true` when this check derives its result from a ref (the honesty rule
+    /// applies — it cannot be hand-set, SC-5).
+    pub fn is_ref_backed(&self) -> bool {
+        self.r#ref.is_some()
+    }
+
+    /// The honest result of this check. Ref-backed ⇒ the derived outcome
+    /// (`Pass→Pass`, `Fail→Fail`, `Unknown→Unknown`), **ignoring** any stored
+    /// `last_result` (closes the honesty hole, SC-5). No ref ⇒ stored
+    /// `last_result` (v0 path). The `derived` projection is supplied by the cli
+    /// (which owns the clock + resolution).
+    pub fn effective_result(&self, derived: Option<&Derived>) -> CheckResult {
+        match (&self.r#ref, derived) {
+            (Some(_), Some(d)) => match d.outcome() {
+                Outcome::Pass => CheckResult::Pass,
+                Outcome::Fail => CheckResult::Fail,
+                Outcome::Unknown => CheckResult::Unknown,
+            },
+            // Ref-backed but no resolution available ⇒ honestly unknown.
+            (Some(_), None) => CheckResult::Unknown,
+            (None, _) => self.last_result,
+        }
+    }
 }
 
 /// The feedback cycle made auditable (#10): append-only record of why a process
@@ -410,6 +451,17 @@ fn write_list(f: &mut fmt::Formatter<'_>, label: &str, items: &[String]) -> fmt:
 // Control
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// One implementation of a control's requirement, with its own derived status
+/// (P1 N:M — one requirement satisfied by many implementations, each resolving
+/// its own source).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Implementation {
+    pub id: String,
+    pub r#ref: Ref,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<Resolution>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Control {
     pub id: String,
@@ -420,6 +472,110 @@ pub struct Control {
     pub status: ControlStatus,
     #[serde(default)]
     pub evidence: Vec<Evidence>,
+    /// v1 glue: a typed pointer to the authoritative source (#7). When present,
+    /// `title` and `status` are DERIVED on read — the stored `title` is only a
+    /// fallback display label, never the authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<Ref>,
+    /// Cache of the last resolution (for display / `command`-kind refs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<Resolution>,
+    /// N:M implementations, each deriving its own status (P1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub implementations: Vec<Implementation>,
+}
+
+impl Control {
+    /// `true` when this control's own status is derived from a ref (#7).
+    pub fn is_ref_backed(&self) -> bool {
+        self.r#ref.is_some()
+    }
+
+    /// The title to display: the resolved value when the control's ref currently
+    /// resolves to a value, else the stored `title` (fallback label).
+    pub fn display_title(&self, derived: Option<&Derived>) -> String {
+        match (self.is_ref_backed(), derived) {
+            (true, Some(Derived::Derived { value, .. }))
+            | (true, Some(Derived::Stale { value, .. })) => value.clone(),
+            _ => self.title.clone(),
+        }
+    }
+
+    /// The honest implementation status. When a ref or implementations are
+    /// present the status is DERIVED: green-eligible (`Implemented`) only if the
+    /// control's own ref (if any) is freshly `Derived` + non-`Fail` AND **every**
+    /// implementation projects to `Derived` + `Pass`. Any `Fail`/`Unresolved`/
+    /// `Stale` forces a non-`Implemented` status. No ref + no impls ⇒ the stored
+    /// hand-set status (asserted, v0 path).
+    ///
+    /// `own` is the control's own ref projection; `impls` are the per-
+    /// implementation projections (same order as `self.implementations`). Both
+    /// are supplied by the cli, which owns the clock + resolution.
+    pub fn effective_status(&self, own: Option<&Derived>, impls: &[Derived]) -> ControlStatus {
+        if !self.is_ref_backed() && self.implementations.is_empty() {
+            return self.status;
+        }
+        // A projection blocks green when its source is Fail/Unresolved/Stale (or a
+        // declared ref that produced no resolution at all). A title-only `Derived`
+        // (Unknown outcome) neither blocks nor proves.
+        let blocks = |d: &Derived| {
+            matches!(
+                d,
+                Derived::Unresolved { .. }
+                    | Derived::Stale { .. }
+                    | Derived::Derived {
+                        outcome: Outcome::Fail,
+                        ..
+                    }
+            )
+        };
+        let own_blocks = match (self.is_ref_backed(), own) {
+            (false, _) => false,
+            (true, Some(d)) => blocks(d),
+            (true, None) => true, // ref declared but no resolution ⇒ honestly blocked
+        };
+        if own_blocks || impls.iter().any(blocks) {
+            return ControlStatus::InProgress;
+        }
+        // Nothing blocks. Green only when an actual Pass exists somewhere.
+        let any_pass = own.is_some_and(Derived::is_green_eligible)
+            || impls.iter().any(Derived::is_green_eligible);
+        if any_pass {
+            ControlStatus::Implemented
+        } else {
+            ControlStatus::InProgress
+        }
+    }
+
+    /// The honest display projection of the control as a whole, for `readiness`
+    /// and rendering. `Asserted` when no ref/impls; otherwise the most honest
+    /// (worst) of the own ref and the implementations: any `Unresolved` ⇒
+    /// `Unresolved`, any `Stale` ⇒ `Stale`, any non-green-eligible derived ⇒ that
+    /// projection, else the own projection (or the first impl when there is no
+    /// own ref).
+    pub fn project(&self, own: Option<Derived>, impls: Vec<Derived>) -> Derived {
+        if !self.is_ref_backed() && self.implementations.is_empty() {
+            return Derived::Asserted;
+        }
+        let mut all: Vec<Derived> = Vec::new();
+        if let Some(d) = own {
+            all.push(d);
+        }
+        all.extend(impls);
+        // Honest worst-case: Unresolved dominates, then Stale, then Fail.
+        if let Some(u) = all.iter().find(|d| matches!(d, Derived::Unresolved { .. })) {
+            return u.clone();
+        }
+        if let Some(s) = all.iter().find(|d| matches!(d, Derived::Stale { .. })) {
+            return s.clone();
+        }
+        if let Some(f) = all.iter().find(|d| matches!(d.outcome(), Outcome::Fail)) {
+            return f.clone();
+        }
+        // All green-eligible or title-only → return the first projection (the
+        // own ref if any, else the first impl).
+        all.into_iter().next().unwrap_or(Derived::Asserted)
+    }
 }
 
 impl fmt::Display for Control {
@@ -434,6 +590,12 @@ impl fmt::Display for Control {
             writeln!(f, "  evidence:")?;
             for e in &self.evidence {
                 writeln!(f, "    {e}")?;
+            }
+        }
+        if !self.implementations.is_empty() {
+            writeln!(f, "  implementations:")?;
+            for i in &self.implementations {
+                writeln!(f, "    {}", i.id)?;
             }
         }
         Ok(())
@@ -581,6 +743,8 @@ mod tests {
             last_result: CheckResult::Unknown,
             last_run_ts: None,
             evidence: vec![],
+            r#ref: None,
+            resolved: None,
         });
         p.checks.push(Check {
             id: "c2".into(),
@@ -589,7 +753,165 @@ mod tests {
             last_result: CheckResult::Unknown,
             last_run_ts: None,
             evidence: vec![],
+            r#ref: None,
+            resolved: None,
         });
         assert_eq!(p.strongest_enforcement(), Some(Enforcement::Ci));
+    }
+
+    // ── v1 glue: projection + honesty (SC-2 domain / SC-5 / SC-10) ────────────
+
+    use crate::reference::{Derived, Outcome, Ref};
+
+    fn ctrl(id: &str, title: &str) -> Control {
+        Control {
+            id: id.into(),
+            title: title.into(),
+            clause_ref: None,
+            applicable: true,
+            status: ControlStatus::NotStarted,
+            evidence: vec![],
+            r#ref: None,
+            resolved: None,
+            implementations: vec![],
+        }
+    }
+
+    fn derived_pass(value: &str) -> Derived {
+        Derived::Derived {
+            value: value.into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "2026-01-01T00:00:00Z".into(),
+            source_excerpt: None,
+        }
+    }
+    fn derived_fail(value: &str) -> Derived {
+        Derived::Derived {
+            value: value.into(),
+            outcome: Outcome::Fail,
+            resolved_ts: "2026-01-01T00:00:00Z".into(),
+            source_excerpt: None,
+        }
+    }
+
+    #[test]
+    fn display_title_prefers_resolved_value_over_stored_fallback() {
+        let mut c = ctrl("c1", "placeholder");
+        c.r#ref = Some(Ref::FileAnchor {
+            path: "x.toml".into(),
+            anchor: "a.title".into(),
+        });
+        let d = Derived::Derived {
+            value: "Alpha".into(),
+            outcome: Outcome::Unknown,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+        };
+        assert_eq!(c.display_title(Some(&d)), "Alpha");
+        // No resolution available ⇒ fall back to stored title.
+        assert_eq!(c.display_title(None), "placeholder");
+    }
+
+    #[test]
+    fn effective_status_honesty_ref_fail_is_never_implemented() {
+        let mut c = ctrl("c1", "t");
+        c.status = ControlStatus::Implemented; // operator hand-set green
+        c.r#ref = Some(Ref::Command {
+            cmd: "just check".into(),
+            dir: ".".into(),
+        });
+        // Source says fail ⇒ derived status must NOT be Implemented.
+        let status = c.effective_status(Some(&derived_fail("fail")), &[]);
+        assert_eq!(status, ControlStatus::InProgress);
+    }
+
+    #[test]
+    fn effective_status_no_ref_is_asserted_passthrough() {
+        let mut c = ctrl("c1", "t");
+        c.status = ControlStatus::Implemented;
+        assert_eq!(c.effective_status(None, &[]), ControlStatus::Implemented);
+    }
+
+    #[test]
+    fn effective_status_nm_one_fail_blocks_green() {
+        let mut c = ctrl("c1", "t");
+        c.implementations = vec![
+            Implementation {
+                id: "rust".into(),
+                r#ref: Ref::Note { text: "x".into() },
+                resolved: None,
+            },
+            Implementation {
+                id: "go".into(),
+                r#ref: Ref::Note { text: "y".into() },
+                resolved: None,
+            },
+        ];
+        // one met, one unmet ⇒ aggregate not green.
+        let status = c.effective_status(None, &[derived_pass("met"), derived_fail("unmet")]);
+        assert_eq!(status, ControlStatus::InProgress);
+        // both met ⇒ implemented.
+        let status = c.effective_status(None, &[derived_pass("met"), derived_pass("met")]);
+        assert_eq!(status, ControlStatus::Implemented);
+    }
+
+    #[test]
+    fn project_surfaces_worst_case() {
+        let c = ctrl("c1", "t");
+        // asserted when no ref/impls.
+        assert_eq!(c.project(None, vec![]), Derived::Asserted);
+        // unresolved dominates (control made ref-backed + one impl).
+        let mut c2 = ctrl("c2", "t");
+        c2.r#ref = Some(Ref::Note { text: "x".into() });
+        c2.implementations = vec![Implementation {
+            id: "go".into(),
+            r#ref: Ref::Note { text: "y".into() },
+            resolved: None,
+        }];
+        let proj = c2.project(
+            Some(derived_pass("met")),
+            vec![Derived::Unresolved {
+                reason: "missing".into(),
+            }],
+        );
+        assert!(matches!(proj, Derived::Unresolved { .. }));
+    }
+
+    #[test]
+    fn check_effective_result_ignores_stored_when_ref_backed() {
+        let mut c = Check {
+            id: "check-1".into(),
+            description: "d".into(),
+            enforcement: Enforcement::Ci,
+            last_result: CheckResult::Pass, // operator forged a pass
+            last_run_ts: None,
+            evidence: vec![],
+            r#ref: Some(Ref::FileAnchor {
+                path: "x.toml".into(),
+                anchor: "a.status".into(),
+            }),
+            resolved: None,
+        };
+        // source says fail ⇒ effective result is fail regardless of stored Pass.
+        assert_eq!(
+            c.effective_result(Some(&derived_fail("unmet"))),
+            CheckResult::Fail
+        );
+        // no ref ⇒ stored last_result.
+        c.r#ref = None;
+        assert_eq!(c.effective_result(None), CheckResult::Pass);
+    }
+
+    #[test]
+    fn no_ref_control_serializes_byte_identical_to_v0() {
+        // A v0 control JSON (no ref/resolved/implementations) round-trips with no
+        // new keys appearing (SC-2 backward compatibility).
+        let v0 =
+            r#"{"id":"c1","title":"C1","applicable":true,"status":"not_started","evidence":[]}"#;
+        let c: Control = serde_json::from_str(v0).unwrap();
+        let out = serde_json::to_string(&c).unwrap();
+        assert!(!out.contains("\"ref\""), "ref leaked: {out}");
+        assert!(!out.contains("resolved"), "resolved leaked: {out}");
+        assert!(!out.contains("implementations"), "impls leaked: {out}");
     }
 }
