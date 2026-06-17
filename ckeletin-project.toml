@@ -54,7 +54,10 @@ cli = ["crates/cli"]
 #   std::error::Error. Manifesto #8 — errors are domain knowledge.
 domain = ["serde", "thiserror"]
 # ckeletin: required — framework crate re-export (CKSPEC-ARCH-005)
-infrastructure = ["ckeletin"]
+# serde_json: resolver parses JSON result artifacts at the disk boundary (#8 — the
+#   dereference engine lives here, not in domain).
+# toml: resolver parses TOML requirement manifests / mappings at the disk boundary (#8).
+infrastructure = ["ckeletin", "serde_json", "toml"]
 
 # ── Violation tests ───────────────────────────────────────────────────────────
 #

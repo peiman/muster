@@ -19,6 +19,12 @@ print_stderr = "deny"
 
 [dependencies]
 ckeletin = { path = "../../.ckeletin/crate" }
+# serde_json: parse JSON result artifacts (e.g. conformance-report.json) in the
+#   resolver — the disk boundary the domain may not touch (#8).
+serde_json = { workspace = true }
+# toml: parse TOML requirement manifests / mappings (e.g. conformance-mapping.toml)
+#   in the resolver — same disk boundary (#8).
+toml = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

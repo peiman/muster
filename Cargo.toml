@@ -21,6 +21,9 @@ debug = true
 # Serialization — cross-cutting concern permitted in domain (CKSPEC-ARCH-004 notes)
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# TOML parsing — infrastructure resolver reads requirement manifests / result
+# artifacts at the disk boundary (#8). cli-/infra-only, never in domain.
+toml = "0.8"
 
 # CLI framework — ONLY in cli crate (CKSPEC-ARCH-003)
 clap = { version = "4", features = ["derive", "env", "string"] }
