@@ -36,8 +36,8 @@ const INTENTS: &[(&str, &str)] = &[
         "muster control add <id> --title <t> --clause-ref <ref>",
     ),
     (
-        "Point a control at a source (resolve title/status on read, don't copy)",
-        "muster control add <id> --title <t> --ref-file <path> --ref-anchor <dotted.anchor>",
+        "Point a control at a source (resolve title/status on read, don't copy; --title optional, it derives)",
+        "muster control add <id> --ref-file <path> --ref-anchor <dotted.anchor>",
     ),
     (
         "Re-resolve a reference (refresh the cached resolution)",

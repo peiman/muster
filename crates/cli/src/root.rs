@@ -279,8 +279,10 @@ pub enum ControlSub {
     /// `--ref-*` to back its title/status by an authoritative source (#7).
     Add {
         id: String,
+        /// Human label. Optional when a `--ref-*` backs the control (the title is
+        /// then a DERIVED projection of the source; this is a fallback only).
         #[arg(long)]
-        title: String,
+        title: Option<String>,
         #[arg(long = "clause-ref")]
         clause_ref: Option<String>,
         #[arg(long)]

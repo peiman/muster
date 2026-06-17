@@ -552,6 +552,45 @@ fn sc3_title_is_a_resolved_projection() {
 }
 
 #[test]
+fn title_is_optional_when_a_ref_is_supplied() {
+    // Tidy (SPEC P0 — "title as a resolved projection"): when a ref backs the
+    // control, the title is DERIVED, so `--title` is an optional fallback. The
+    // stored fallback defaults to the control id (legible when unresolved).
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "src.toml", "[requirements.r1]\ntitle = \"Alpha\"\n");
+    // No --title, but a ref is supplied → succeeds, title derives from source.
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "requirements.r1.title",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c1"]);
+    assert_eq!(c["title"], "Alpha", "title must derive from source");
+    assert_eq!(c["resolution"]["resolution_state"], "derived");
+    assert_eq!(
+        c["fallback_title"], "c1",
+        "absent --title falls back to the control id"
+    );
+
+    // No --title and NO ref → asserted controls still need a human label.
+    let (ok, env) = run_json(&d, &["control", "add", "c2"]);
+    assert!(!ok, "an asserted (no-ref) control must require --title");
+    assert!(
+        env["error"].as_str().unwrap_or("").contains("--title"),
+        "error must name the missing --title flag: {env}"
+    );
+}
+
+#[test]
 fn sc4_and_sc5_checks_derive_and_cannot_be_forged() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);

@@ -28,6 +28,18 @@ pub fn execute(sub: ControlSub, output: &Output) -> Boxed {
             ref_flags,
         } => {
             let r = ref_flags.to_ref()?;
+            // The title is a DERIVED projection when a ref backs the control (#7),
+            // so `--title` is optional then — fall back to the id as a legible
+            // placeholder. An asserted (no-ref) control still needs a human label.
+            let title =
+                match (title, &r) {
+                    (Some(t), _) => t,
+                    (None, Some(_)) => id.clone(),
+                    (None, None) => return Err(
+                        "an asserted control needs --title (or back it with --ref-* to derive one)"
+                            .into(),
+                    ),
+                };
             let mut s = store::load(&dir)?;
             s.add_control(&id, &title, clause_ref, applicable.unwrap_or(true))?;
             if let Some(r) = r {
