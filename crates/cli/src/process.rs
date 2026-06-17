@@ -1,11 +1,14 @@
 //! `process` command handlers — the spine. Pattern: resolve data dir → load →
 //! pure domain op (passing `ts` from the boundary clock) → save → render.
 
+use crate::resolve;
 use crate::root::{CheckArgs, CheckSub, MetricSub, ProcessSub, RiskSub, StepSub};
 use crate::store;
 use crate::view::{Listing, WithNext};
-use domain::{CheckResult, Evidence, EvidenceKind};
+use domain::{CheckResult, Evidence, EvidenceKind, Process};
 use infrastructure::output::Output;
+use serde::{Serialize, Serializer};
+use std::fmt;
 use std::io;
 use std::str::FromStr;
 
@@ -42,7 +45,10 @@ pub fn execute(sub: ProcessSub, output: &Output) -> Boxed {
                 Ok(())
             } else {
                 let p = s.process(&id)?;
-                render(output, "process show", p, "muster readiness".to_string())
+                let view = ProcessShow::build(p);
+                let wrapped = WithNext::new(&view, "muster readiness".to_string());
+                output.success("process show", &wrapped, &mut io::stdout())?;
+                Ok(())
             }
         }
         ProcessSub::List => {
@@ -158,32 +164,60 @@ pub fn execute(sub: ProcessSub, output: &Output) -> Boxed {
 }
 
 fn check(args: CheckArgs, dir: &std::path::Path, output: &Output) -> Boxed {
-    // Create form: `process check add <id> --description --enforcement`.
+    // Create form: `process check add <id> --description --enforcement [--ref-*]`.
     if let Some(CheckSub::Add {
         id,
         description,
         enforcement,
+        ref_flags,
     }) = args.sub
     {
+        let r = ref_flags.to_ref()?;
         let mut s = store::load(dir)?;
         let check_id = s.add_check(&id, &description, enforcement)?;
+        let next = if let Some(r) = r {
+            s.set_check_ref(&id, &check_id, r.clone())?;
+            let res = resolve::resolve(&r, &store::now_iso());
+            s.set_check_resolution(&id, &check_id, res)?;
+            // A ref-backed check derives its result; it cannot be hand-set.
+            format!("muster process check {id} {check_id} --resolve")
+        } else {
+            format!("muster process check {id} {check_id} --pass")
+        };
         store::save(dir, &s)?;
         let p = s.process(&id)?;
-        return render(
-            output,
-            "process check add",
-            p,
-            format!("muster process check {id} {check_id} --pass"),
-        );
+        return render(output, "process check add", p, next);
     }
 
-    // Ingest form: `process check <id> <check-id> --pass|--fail [--evidence k v]`.
-    let id = args
-        .id
-        .ok_or("missing process id — usage: muster process check <id> <check-id> --pass|--fail")?;
-    let check_id = args
-        .check_id
-        .ok_or("missing check id — usage: muster process check <id> <check-id> --pass|--fail")?;
+    // Ingest / resolve form: `process check <id> <check-id> --pass|--fail|--resolve`.
+    let id = args.id.ok_or(
+        "missing process id — usage: muster process check <id> <check-id> --pass|--fail|--resolve",
+    )?;
+    let check_id = args.check_id.ok_or(
+        "missing check id — usage: muster process check <id> <check-id> --pass|--fail|--resolve",
+    )?;
+
+    // Resolve form: re-run the check's ref and refresh its cache.
+    if args.resolve {
+        let mut s = store::load(dir)?;
+        let now = store::now_iso();
+        let p = s.process(&id)?;
+        let c = p
+            .checks
+            .iter()
+            .find(|c| c.id == check_id)
+            .ok_or_else(|| format!("check '{check_id}' not found on process '{id}'"))?;
+        let r = c
+            .r#ref
+            .clone()
+            .ok_or_else(|| format!("check '{check_id}' has no ref to resolve"))?;
+        let res = resolve::resolve(&r, &now);
+        s.set_check_resolution(&id, &check_id, res)?;
+        store::save(dir, &s)?;
+        let p = s.process(&id)?;
+        return render(output, "process check", p, "muster readiness".to_string());
+    }
+
     let result = match (args.pass, args.fail) {
         (true, false) => CheckResult::Pass,
         (false, true) => CheckResult::Fail,
@@ -200,14 +234,74 @@ fn check(args: CheckArgs, dir: &std::path::Path, output: &Output) -> Boxed {
     };
     let mut s = store::load(dir)?;
     let ts = store::now_iso();
+    // Ref-backed checks reject hand-set results (honesty rule, SC-5).
     s.ingest_check(&id, &check_id, result, &ts, evidence)?;
     store::save(dir, &s)?;
     let p = s.process(&id)?;
     render(output, "process check", p, "muster readiness".to_string())
 }
 
-fn render(output: &Output, command: &str, process: &domain::Process, next: String) -> Boxed {
-    let view = WithNext::new(process, next);
-    output.success(command, &view, &mut io::stdout())?;
+fn render(output: &Output, command: &str, process: &Process, next: String) -> Boxed {
+    let view = ProcessShow::build(process);
+    let wrapped = WithNext::new(&view, next);
+    output.success(command, &wrapped, &mut io::stdout())?;
     Ok(())
+}
+
+/// `process show` view: identical to the raw `Process` JSON, except each
+/// ref-backed check's `last_result` is the DERIVED outcome (resolved on read,
+/// SC-4) and carries an honest `resolution` field. The human surface renders a
+/// clone with derived results so text and JSON tell the same story (#7).
+struct ProcessShow {
+    json: serde_json::Value,
+    display_clone: Process,
+}
+
+impl ProcessShow {
+    fn build(p: &Process) -> ProcessShow {
+        let now = store::now_iso();
+        let fresh = store::freshness_secs();
+
+        // A clone whose ref-backed checks show their derived result (human surface).
+        let mut display_clone = p.clone();
+        for c in &mut display_clone.checks {
+            if c.is_ref_backed() {
+                let derived = resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh);
+                c.last_result = c.effective_result(Some(&derived));
+            }
+        }
+
+        // JSON from the derived clone, then splice in each check's resolution.
+        let mut json = serde_json::to_value(&display_clone).unwrap_or(serde_json::Value::Null);
+        if let Some(arr) = json.get_mut("checks").and_then(|v| v.as_array_mut()) {
+            for (cv, c) in arr.iter_mut().zip(p.checks.iter()) {
+                if c.is_ref_backed() {
+                    let derived =
+                        resolve::project(c.r#ref.as_ref(), c.resolved.as_ref(), &now, fresh);
+                    if let Ok(rv) = serde_json::to_value(&derived)
+                        && let Some(obj) = cv.as_object_mut()
+                    {
+                        obj.insert("resolution".to_string(), rv);
+                    }
+                }
+            }
+        }
+
+        ProcessShow {
+            json,
+            display_clone,
+        }
+    }
+}
+
+impl Serialize for ProcessShow {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.json.serialize(s)
+    }
+}
+
+impl fmt::Display for ProcessShow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display_clone)
+    }
 }

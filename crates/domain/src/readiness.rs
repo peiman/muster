@@ -9,21 +9,33 @@
 //! exists** (#3 honest signals).
 
 use crate::model::{ControlStatus, IncidentStatus, NonconformityStatus, ProcessStatus};
+use crate::reference::Derived;
 use crate::store::Store;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Readiness {
     pub verdict: String,
     pub control_coverage: ControlCoverage,
+    /// v1: controls split by whether their status is DERIVED from a ref (resolved
+    /// from source) or merely ASSERTED (hand-set, unverified).
+    pub controls: ControlsSplit,
     pub proven: Vec<String>,
     pub asserted: Vec<String>,
     pub refuting_signals: Vec<RefutingSignal>,
     pub enforcement: Vec<EnforcementEntry>,
     pub gap_findings: Vec<GapFinding>,
     pub cycles: Vec<Vec<String>>,
+}
+
+/// The v1 honesty split: a control whose status is resolved from an authoritative
+/// source (`derived`) vs one hand-set without a ref (`asserted`, unverified).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ControlsSplit {
+    pub derived: Vec<String>,
+    pub asserted: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -64,19 +76,36 @@ pub struct GapFinding {
 }
 
 /// Compute readiness over the whole store, or (with `scope`) over one process
-/// and its reachable sub-graph.
+/// and its reachable sub-graph. v0 entry point — treats every control as asserted
+/// (no resolution index); the cli calls `readiness_with` to pass derived
+/// projections.
 pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
+    readiness_with(store, scope, &BTreeMap::new())
+}
+
+/// The v1 truth-meter. `index` maps a control id to its honest `Derived`
+/// projection (built by the cli, which owns the clock + resolution — keeping the
+/// domain clock- and I/O-free, #8). Controls absent from the index (or mapped to
+/// `Asserted`) follow the v0 hand-set path; ref-backed controls count as covered
+/// only when freshly `Derived` + `Pass`, and `Unresolved`/`Stale`/derived-`Fail`
+/// become honest gap findings (never silent green, #1/#3).
+pub fn readiness_with(
+    store: &Store,
+    scope: Option<&str>,
+    index: &BTreeMap<String, Derived>,
+) -> Readiness {
     let in_scope: BTreeSet<String> = match scope {
         Some(id) => store.reachable(id),
         None => store.processes.keys().cloned().collect(),
     };
 
-    let control_coverage = control_coverage(store, scope, &in_scope);
+    let control_coverage = control_coverage(store, scope, &in_scope, index);
+    let controls = controls_split(store, scope, &in_scope, index);
     let (proven, asserted) = proven_vs_asserted(store, &in_scope);
     let refuting_signals = refuting_signals(store, &in_scope);
     let enforcement = enforcement(store, &in_scope);
     let cycles = scoped_cycles(store, scope, &in_scope);
-    let gap_findings = gap_findings(store, scope, &in_scope, &cycles);
+    let gap_findings = gap_findings(store, scope, &in_scope, &cycles, index);
 
     // Full coverage via exact integer equality (no float comparison): every
     // applicable control is implemented-with-evidence.
@@ -90,6 +119,7 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
     Readiness {
         verdict,
         control_coverage,
+        controls,
         proven,
         asserted,
         refuting_signals,
@@ -97,6 +127,36 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
         gap_findings,
         cycles,
     }
+}
+
+/// A control is `derived` when its projection is anything other than `Asserted`
+/// (i.e. it has a ref or implementations resolved from a source).
+fn is_derived(index: &BTreeMap<String, Derived>, id: &str) -> bool {
+    !matches!(index.get(id), None | Some(Derived::Asserted))
+}
+
+/// Split the in-scope controls into derived (resolved from source) vs asserted
+/// (hand-set, unverified). id-sorted (deterministic).
+fn controls_split(
+    store: &Store,
+    scope: Option<&str>,
+    in_scope: &BTreeSet<String>,
+    index: &BTreeMap<String, Derived>,
+) -> ControlsSplit {
+    let scoped = |id: &str| scope.is_none() || applicable_in_scope(store, scope, in_scope, id);
+    let mut derived = Vec::new();
+    let mut asserted = Vec::new();
+    for c in store.controls.values() {
+        if !scoped(&c.id) {
+            continue;
+        }
+        if is_derived(index, &c.id) {
+            derived.push(c.id.clone());
+        } else {
+            asserted.push(c.id.clone());
+        }
+    }
+    ControlsSplit { derived, asserted }
 }
 
 /// The applicable controls relevant to this view. Unscoped: every applicable
@@ -138,6 +198,7 @@ fn control_coverage(
     store: &Store,
     scope: Option<&str>,
     in_scope: &BTreeSet<String>,
+    index: &BTreeMap<String, Derived>,
 ) -> ControlCoverage {
     let applicable_ids = applicable_controls(store, scope, in_scope);
     let applicable = applicable_ids.len();
@@ -148,6 +209,21 @@ fn control_coverage(
             Some(c) => c,
             None => continue,
         };
+        // A ref-backed control's resolution IS its evidence (#7): it counts as
+        // covered only when freshly Derived + Pass. An asserted control follows
+        // the v0 rule (status Implemented + attached evidence).
+        if is_derived(index, id) {
+            let d = index.get(id).expect("is_derived ⇒ present");
+            if d.is_green_eligible() {
+                implemented_with_evidence += 1;
+            } else {
+                gaps.push(CoverageGap {
+                    id: id.clone(),
+                    reason: derived_gap_reason(d),
+                });
+            }
+            continue;
+        }
         let has_evidence = !c.evidence.is_empty();
         if c.status == ControlStatus::Implemented && has_evidence {
             implemented_with_evidence += 1;
@@ -300,13 +376,67 @@ fn scoped_cycles(
     }
 }
 
+/// Human-readable reason a ref-backed control is not covered.
+fn derived_gap_reason(d: &Derived) -> String {
+    match d {
+        Derived::Unresolved { reason } => format!("ref unresolved: {reason}"),
+        Derived::Stale { resolved_ts, .. } => {
+            format!("ref resolution is stale (resolved {resolved_ts}) — re-resolve")
+        }
+        Derived::Derived { value, .. } => {
+            format!("resolved source is not passing (value: {value})")
+        }
+        Derived::Asserted => "asserted (unverified)".to_string(),
+    }
+}
+
 fn gap_findings(
     store: &Store,
     scope: Option<&str>,
     in_scope: &BTreeSet<String>,
     cycles: &[Vec<String>],
+    index: &BTreeMap<String, Derived>,
 ) -> Vec<GapFinding> {
     let mut out = Vec::new();
+    // Reference gaps (v1): a ref that can't be followed (unresolved), a cache
+    // past its freshness bound (stale), or a source that resolves to fail —
+    // each an honest gap, never silent green (#1/#3).
+    for c in store.controls.values() {
+        if !(scope.is_none() || applicable_in_scope(store, scope, in_scope, &c.id)) {
+            continue;
+        }
+        match index.get(&c.id) {
+            Some(Derived::Unresolved { reason }) => out.push(GapFinding {
+                kind: "ref_unresolved".into(),
+                subject_id: c.id.clone(),
+                message: format!(
+                    "control '{}' has a dangling ref — {reason}; fix the source or re-point: muster control show {}",
+                    c.id, c.id
+                ),
+            }),
+            Some(Derived::Stale { resolved_ts, .. }) => out.push(GapFinding {
+                kind: "ref_stale".into(),
+                subject_id: c.id.clone(),
+                message: format!(
+                    "control '{}' resolution is stale (resolved {resolved_ts}) — re-resolve: muster control resolve {}",
+                    c.id, c.id
+                ),
+            }),
+            Some(Derived::Derived {
+                outcome: crate::reference::Outcome::Fail,
+                value,
+                ..
+            }) => out.push(GapFinding {
+                kind: "ref_failing".into(),
+                subject_id: c.id.clone(),
+                message: format!(
+                    "control '{}' resolved source is failing (value: {value}) — fix the source",
+                    c.id
+                ),
+            }),
+            _ => {}
+        }
+    }
     // Active processes: missing risks / metrics / controls (guide, don't gate).
     for pid in in_scope {
         let p = match store.processes.get(pid) {
@@ -407,6 +537,16 @@ impl fmt::Display for Readiness {
         for g in &self.control_coverage.gaps {
             writeln!(f, "    gap: {} — {}", g.id, g.reason)?;
         }
+        writeln!(
+            f,
+            "  controls (derived): {}",
+            join_or_none(&self.controls.derived)
+        )?;
+        writeln!(
+            f,
+            "  controls (asserted, unverified): {}",
+            join_or_none(&self.controls.asserted)
+        )?;
         writeln!(f, "  proven: {}", join_or_none(&self.proven))?;
         writeln!(f, "  asserted: {}", join_or_none(&self.asserted))?;
         if !self.refuting_signals.is_empty() {

@@ -12,6 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const ENV_DATA_DIR: &str = "MUSTER_DATA_DIR";
 const DEFAULT_DATA_DIR: &str = "./.muster";
+const ENV_FRESHNESS: &str = "MUSTER_FRESHNESS_SECS";
+const DEFAULT_FRESHNESS_SECS: i64 = 86_400;
 const MANIFEST: &str = "manifest.json";
 const SCHEMA_VERSION: u32 = 1;
 
@@ -182,6 +184,54 @@ pub fn now_iso() -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
+/// The freshness bound (seconds) for cached `command`-ref resolutions, from
+/// `MUSTER_FRESHNESS_SECS` (default 86400 = one day). `0` ⇒ never trust a served
+/// cache (the deterministic SC-7 staleness hook).
+pub fn freshness_secs() -> i64 {
+    match std::env::var(ENV_FRESHNESS) {
+        Ok(v) => v.trim().parse::<i64>().unwrap_or(DEFAULT_FRESHNESS_SECS),
+        Err(_) => DEFAULT_FRESHNESS_SECS,
+    }
+}
+
+/// Parse an RFC-3339 `YYYY-MM-DDThh:mm:ssZ` timestamp (as produced by `now_iso`)
+/// back to epoch seconds. The inverse of `now_iso` — kept next to it (SSOT, #7).
+/// Returns `None` for any shape `now_iso` would never emit.
+pub fn parse_iso_to_epoch(ts: &str) -> Option<i64> {
+    // Expect exactly "YYYY-MM-DDThh:mm:ssZ" (20 chars).
+    let b = ts.as_bytes();
+    if b.len() != 20
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+        || b[19] != b'Z'
+    {
+        return None;
+    }
+    let num = |s: &str| s.parse::<i64>().ok();
+    let y = num(&ts[0..4])?;
+    let mo = num(&ts[5..7])?;
+    let d = num(&ts[8..10])?;
+    let h = num(&ts[11..13])?;
+    let mi = num(&ts[14..16])?;
+    let s = num(&ts[17..19])?;
+    let days = days_from_civil(y, mo, d);
+    Some(days * 86_400 + h * 3600 + mi * 60 + s)
+}
+
+/// (year, month, day) → days since 1970-01-01. Howard Hinnant's `days_from_civil`,
+/// the inverse of `civil_from_days`. Computed entirely in `i64`.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
 /// Days-since-epoch → (year, month, day). Howard Hinnant's `civil_from_days`,
 /// computed entirely in `i64`. The final `month`/`day` are mathematically
 /// bounded to [1,12] / [1,31], so the narrowing casts are exact.
@@ -207,6 +257,28 @@ mod tests {
     fn civil_from_days_known_dates() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(18_993), (2022, 1, 1));
+    }
+
+    #[test]
+    fn parse_iso_to_epoch_inverts_now_iso_shape() {
+        // Known epoch → civil → string → epoch round-trips.
+        assert_eq!(parse_iso_to_epoch("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            parse_iso_to_epoch("2022-01-01T00:00:00Z"),
+            Some(18_993 * 86_400)
+        );
+        // A real now_iso parses and the days component matches civil_from_days.
+        let ts = now_iso();
+        let epoch = parse_iso_to_epoch(&ts).expect("now_iso parses");
+        let (y, m, d) = civil_from_days(epoch / 86_400);
+        assert_eq!(
+            format!("{y:04}-{m:02}-{d:02}"),
+            &ts[0..10],
+            "epoch round-trip mismatch"
+        );
+        // Bad shapes return None.
+        assert!(parse_iso_to_epoch("not-a-timestamp").is_none());
+        assert!(parse_iso_to_epoch("2022-01-01 00:00:00").is_none());
     }
 
     #[test]

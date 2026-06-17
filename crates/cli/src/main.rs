@@ -4,12 +4,14 @@
 mod catalog;
 mod control;
 mod explain;
+mod import;
 mod incident;
 mod init;
 mod nonconformity;
 mod ping;
 mod process;
 mod readiness;
+mod resolve;
 mod root;
 mod store;
 mod version;

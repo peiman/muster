@@ -1,7 +1,57 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::{
-    ControlStatus, Enforcement, EvidenceKind, NonconformitySource, ProcessStatus, Severity,
+    ControlStatus, Enforcement, EvidenceKind, NonconformitySource, ProcessStatus, Ref, Severity,
 };
+
+/// Shared `--ref-*` flags for pointing an entity at an authoritative source (#7).
+/// At most one ref kind: file_anchor (`--ref-file` + `--ref-anchor`), command
+/// (`--ref-cmd` + `--ref-dir`), or note (`--ref-note`). clap enforces the mutual
+/// exclusion + the file/cmd pairing.
+#[derive(Args, Debug, Clone)]
+pub struct RefFlags {
+    /// file_anchor: path to a TOML/JSON source file
+    #[arg(long = "ref-file", requires = "ref_anchor", conflicts_with_all = ["ref_cmd", "ref_note"])]
+    pub ref_file: Option<String>,
+    /// file_anchor: dotted anchor of the scalar to read (e.g. requirements.R1.title)
+    #[arg(long = "ref-anchor")]
+    pub ref_anchor: Option<String>,
+    /// command: a command whose exit code is the pass/fail signal
+    #[arg(long = "ref-cmd", requires = "ref_dir", conflicts_with_all = ["ref_file", "ref_note"])]
+    pub ref_cmd: Option<String>,
+    /// command: the directory to run `--ref-cmd` in
+    #[arg(long = "ref-dir")]
+    pub ref_dir: Option<String>,
+    /// note: an opaque manual reference (always surfaced as asserted/unverified)
+    #[arg(long = "ref-note", conflicts_with_all = ["ref_file", "ref_cmd"])]
+    pub ref_note: Option<String>,
+}
+
+impl RefFlags {
+    /// Build the `Ref` these flags describe, or `None` when no ref kind was given.
+    /// Returns `Err` only on a half-specified file/command pair clap can't catch.
+    pub fn to_ref(&self) -> Result<Option<Ref>, String> {
+        if let Some(path) = &self.ref_file {
+            let anchor = self
+                .ref_anchor
+                .clone()
+                .ok_or("--ref-file requires --ref-anchor")?;
+            Ok(Some(Ref::FileAnchor {
+                path: path.clone(),
+                anchor,
+            }))
+        } else if let Some(cmd) = &self.ref_cmd {
+            let dir = self.ref_dir.clone().ok_or("--ref-cmd requires --ref-dir")?;
+            Ok(Some(Ref::Command {
+                cmd: cmd.clone(),
+                dir,
+            }))
+        } else if let Some(text) = &self.ref_note {
+            Ok(Some(Ref::Note { text: text.clone() }))
+        } else {
+            Ok(None)
+        }
+    }
+}
 
 /// muster — an AI-first ledningssystem: run your management system as a living
 /// process map, become certification-ready, and handle incidents. One spine.
@@ -192,6 +242,9 @@ pub struct CheckArgs {
     /// Record a failing result
     #[arg(long)]
     pub fail: bool,
+    /// Re-resolve a ref-backed check (refresh its cached resolution)
+    #[arg(long, conflicts_with_all = ["pass", "fail"])]
+    pub resolve: bool,
     /// Optional evidence for the result: <kind> <value>
     #[arg(long, num_args = 2, value_names = ["KIND", "VALUE"])]
     pub evidence: Option<Vec<String>>,
@@ -199,13 +252,16 @@ pub struct CheckArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum CheckSub {
-    /// Create a conformance check on a process
+    /// Create a conformance check on a process. Pass `--ref-*` to derive its
+    /// result from an authoritative source (#7) instead of hand-setting it.
     Add {
         id: String,
         #[arg(long)]
         description: String,
         #[arg(long, value_parser = parse_enum::<Enforcement>)]
         enforcement: Enforcement,
+        #[command(flatten)]
+        ref_flags: RefFlags,
     },
 }
 
@@ -219,7 +275,8 @@ pub struct ControlCmd {
 
 #[derive(Subcommand, Debug)]
 pub enum ControlSub {
-    /// Define a control (any framework — muster is standard-agnostic)
+    /// Define a control (any framework — muster is standard-agnostic). Pass
+    /// `--ref-*` to back its title/status by an authoritative source (#7).
     Add {
         id: String,
         #[arg(long)]
@@ -228,10 +285,12 @@ pub enum ControlSub {
         clause_ref: Option<String>,
         #[arg(long)]
         applicable: Option<bool>,
+        #[command(flatten)]
+        ref_flags: RefFlags,
     },
     /// List all controls
     List,
-    /// Show a control
+    /// Show a control (derives title/status from its ref on read)
     Show { id: String },
     /// Set a control's implementation status
     SetStatus {
@@ -246,6 +305,46 @@ pub enum ControlSub {
         kind: EvidenceKind,
         value: String,
     },
+    /// Re-resolve a control's ref (refresh the cached resolution)
+    Resolve { id: String },
+    /// Link an implementation (N:M) — point it at its own source (#7)
+    AddImplementation {
+        id: String,
+        #[arg(long = "impl-id")]
+        impl_id: String,
+        #[command(flatten)]
+        ref_flags: RefFlags,
+    },
+    /// Import controls as references from a TOML/JSON requirements manifest
+    Import {
+        manifest: String,
+        #[arg(long, value_parser = parse_enum::<ManifestFormat>)]
+        format: Option<ManifestFormat>,
+        #[arg(long, default_value = "requirements")]
+        prefix: String,
+        #[arg(long = "title-field", default_value = "title")]
+        title_field: String,
+    },
+}
+
+/// Manifest format for `control import` (else inferred from the file extension).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestFormat {
+    Toml,
+    Json,
+}
+
+impl std::str::FromStr for ManifestFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "toml" => Ok(ManifestFormat::Toml),
+            "json" => Ok(ManifestFormat::Json),
+            other => Err(format!(
+                "invalid format '{other}' — expected one of: toml, json"
+            )),
+        }
+    }
 }
 
 // ── incident ─────────────────────────────────────────────────────────────────

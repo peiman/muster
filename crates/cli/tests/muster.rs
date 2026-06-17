@@ -493,3 +493,330 @@ fn determinism() {
     };
     assert_eq!(readiness_stable(), readiness_stable());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v1 glue (SC-3…SC-11) — reference-backed controls/checks, derived on read.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Write `body` to `name` under `tmp`, returning the absolute path as a String.
+fn write_src(tmp: &TempDir, name: &str, body: &str) -> String {
+    let p = tmp.path().join(name);
+    std::fs::write(&p, body).unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+/// Run in JSON mode WITHOUT asserting success; return (success, parsed envelope).
+fn run_json(dir: &Path, args: &[&str]) -> (bool, Value) {
+    let out = muster(dir)
+        .args(args)
+        .args(["--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|_| serde_json::json!({"status":"error"}));
+    (out.status.success(), v)
+}
+
+#[test]
+fn sc3_title_is_a_resolved_projection() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "src.toml", "[requirements.r1]\ntitle = \"Alpha\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "placeholder",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "requirements.r1.title",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c1"]);
+    assert_eq!(c["title"], "Alpha", "title must derive from source");
+    assert_eq!(c["resolution"]["resolution_state"], "derived");
+    assert_eq!(c["fallback_title"], "placeholder");
+
+    // Edit the source → muster reflects it on the next read (not stale-forever).
+    std::fs::write(&src, "[requirements.r1]\ntitle = \"Beta\"\n").unwrap();
+    let c2 = data(&d, &["control", "show", "c1"]);
+    assert_eq!(
+        c2["title"], "Beta",
+        "edit must reflect with no muster mutation"
+    );
+}
+
+#[test]
+fn sc4_and_sc5_checks_derive_and_cannot_be_forged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"unmet\"\n");
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(
+        &d,
+        &[
+            "process",
+            "check",
+            "add",
+            "p1",
+            "--description",
+            "arch",
+            "--enforcement",
+            "ci",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    // SC-4: derived fail.
+    let p = data(&d, &["process", "show", "p1"]);
+    assert_eq!(p["checks"][0]["last_result"], "fail");
+    // SC-5: hand-setting pass on a ref-backed check is rejected.
+    let (ok, env) = run_json(&d, &["process", "check", "p1", "check-1", "--pass"]);
+    assert!(!ok, "forging a pass on a ref-backed check must fail");
+    assert!(
+        env["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("reference-backed"),
+        "error must name the ref as authority: {env}"
+    );
+    // Flip source to met → derived pass after a resolve.
+    std::fs::write(&src, "[r.r1]\nstatus = \"met\"\n").unwrap();
+    let p2 = data(&d, &["process", "show", "p1"]);
+    // file_anchor re-resolves live on read.
+    assert_eq!(p2["checks"][0]["last_result"], "pass");
+}
+
+#[test]
+fn sc6_dangling_ref_is_unresolved_and_a_gap() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-file",
+            "/no/such/file.toml",
+            "--ref-anchor",
+            "a.b",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c1"]);
+    assert_eq!(c["resolution"]["resolution_state"], "unresolved");
+    let r = data(&d, &["readiness"]);
+    assert!(r["verdict"].as_str().unwrap().starts_with("GAPS"));
+    assert!(
+        r["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == "ref_unresolved"),
+        "missing ref must surface a ref_unresolved gap: {}",
+        r["gap_findings"]
+    );
+}
+
+#[test]
+fn sc7_command_ref_goes_stale_at_freshness_zero() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let dir = tmp.path().to_string_lossy().into_owned();
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "x",
+            "--ref-cmd",
+            "true",
+            "--ref-dir",
+            &dir,
+        ],
+    );
+    // With freshness 0, the served command cache projects to stale.
+    let out = muster(&d)
+        .env("MUSTER_FRESHNESS_SECS", "0")
+        .args(["control", "show", "c1", "--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["resolution"]["resolution_state"], "stale");
+}
+
+#[test]
+fn sc8_readiness_splits_derived_vs_asserted() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "s.toml", "[r.r1]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "derived-ok",
+            "--title",
+            "x",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+    data(&d, &["control", "add", "asserted-one", "--title", "y"]);
+    let r = data(&d, &["readiness"]);
+    let derived = r["controls"]["derived"].as_array().unwrap();
+    let asserted = r["controls"]["asserted"].as_array().unwrap();
+    assert!(
+        derived.iter().any(|x| x == "derived-ok"),
+        "derived list: {derived:?}"
+    );
+    assert!(
+        asserted.iter().any(|x| x == "asserted-one"),
+        "asserted list: {asserted:?}"
+    );
+}
+
+#[test]
+fn sc9_reference_import_ties_controls_to_source() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let manifest = write_src(
+        &tmp,
+        "reqs.toml",
+        "[requirements.R1]\ntitle = \"One\"\n[requirements.R2]\ntitle = \"Two\"\n[requirements.R3]\ntitle = \"Three\"\n",
+    );
+    let imp = data(&d, &["control", "import", &manifest]);
+    assert_eq!(imp["created"].as_array().unwrap().len(), 3);
+    let c = data(&d, &["control", "show", "r1"]);
+    assert_eq!(c["title"], "One");
+    assert_eq!(c["ref"]["path"], manifest);
+    // Edit the manifest → imported control's shown title changes (reference, not copy).
+    std::fs::write(
+        &manifest,
+        "[requirements.R1]\ntitle = \"One-Edited\"\n[requirements.R2]\ntitle = \"Two\"\n[requirements.R3]\ntitle = \"Three\"\n",
+    )
+    .unwrap();
+    let c2 = data(&d, &["control", "show", "r1"]);
+    assert_eq!(c2["title"], "One-Edited");
+}
+
+#[test]
+fn sc10_nm_one_failing_implementation_blocks_green() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let met = write_src(&tmp, "rust.toml", "[s]\nv = \"met\"\n");
+    let unmet = write_src(&tmp, "go.toml", "[s]\nv = \"unmet\"\n");
+    data(&d, &["control", "add", "c1", "--title", "Cross-impl"]);
+    data(
+        &d,
+        &[
+            "control",
+            "add-implementation",
+            "c1",
+            "--impl-id",
+            "rust",
+            "--ref-file",
+            &met,
+            "--ref-anchor",
+            "s.v",
+        ],
+    );
+    data(
+        &d,
+        &[
+            "control",
+            "add-implementation",
+            "c1",
+            "--impl-id",
+            "go",
+            "--ref-file",
+            &unmet,
+            "--ref-anchor",
+            "s.v",
+        ],
+    );
+    let c = data(&d, &["control", "show", "c1"]);
+    let impls = c["implementations"].as_array().unwrap();
+    assert_eq!(impls.len(), 2);
+    assert_ne!(
+        c["status"], "implemented",
+        "one failing impl must block green"
+    );
+}
+
+#[test]
+fn sc11_ckeletin_acceptance_refuses_green_over_red() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // Copy the real ckeletin manifest into a tempdir, flip ARCH-001 to unmet.
+    let real = "/Users/peiman/dev/ckeletin-rust/conformance-mapping.toml";
+    let body = match std::fs::read_to_string(real) {
+        Ok(b) => b,
+        Err(_) => return, // offline-safe: skip if the source isn't present.
+    };
+    let flipped = body.replacen(
+        "[requirements.CKSPEC-ARCH-001]\ntitle = \"Four-layer architecture\"\nstatus = \"met\"",
+        "[requirements.CKSPEC-ARCH-001]\ntitle = \"Four-layer architecture\"\nstatus = \"unmet\"",
+        1,
+    );
+    assert!(flipped.contains("status = \"unmet\""), "flip must apply");
+    let copy = write_src(&tmp, "conformance-mapping.toml", &flipped);
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "arch",
+            "--title",
+            "placeholder",
+            "--ref-file",
+            &copy,
+            "--ref-anchor",
+            "requirements.CKSPEC-ARCH-001.title",
+        ],
+    );
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(
+        &d,
+        &[
+            "process",
+            "check",
+            "add",
+            "p1",
+            "--description",
+            "arch",
+            "--enforcement",
+            "compile_time",
+            "--ref-file",
+            &copy,
+            "--ref-anchor",
+            "requirements.CKSPEC-ARCH-001.status",
+        ],
+    );
+    // Title derives from the real file.
+    let c = data(&d, &["control", "show", "arch"]);
+    assert_eq!(c["title"], "Four-layer architecture");
+    // Check derives fail from the flipped status — muster refuses to show green.
+    let p = data(&d, &["process", "show", "p1"]);
+    assert_eq!(p["checks"][0]["last_result"], "fail");
+}

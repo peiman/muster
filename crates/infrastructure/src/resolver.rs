@@ -81,6 +81,58 @@ fn unresolved_file(reason: String) -> FileResolution {
     }
 }
 
+/// List the immediate child keys of the table at dotted `prefix` in a TOML/JSON
+/// file (e.g. the requirement IDs under `requirements`). Read-only; used by
+/// `control import` to ingest a manifest as references (#7), not copies. Returns
+/// `Err(reason)` on a missing file / unparseable source / missing-or-non-table
+/// prefix. Keys are returned id-sorted (deterministic, AX).
+pub fn list_keys(path: &str, prefix: &str) -> Result<Vec<String>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read file '{path}': {e}"))?;
+    let mut keys: Vec<String> = if path.ends_with(".json") {
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("cannot parse JSON '{path}': {e}"))?;
+        let table = walk_to_table_json(&v, prefix)?;
+        table.keys().cloned().collect()
+    } else {
+        let v: toml::Value = text
+            .parse()
+            .map_err(|e| format!("cannot parse TOML '{path}': {e}"))?;
+        let table = walk_to_table_toml(&v, prefix)?;
+        table.keys().cloned().collect()
+    };
+    keys.sort();
+    Ok(keys)
+}
+
+fn walk_to_table_toml<'a>(
+    root: &'a toml::Value,
+    prefix: &str,
+) -> Result<&'a toml::map::Map<String, toml::Value>, String> {
+    let mut cur = root;
+    for seg in prefix.split('.').filter(|s| !s.is_empty()) {
+        cur = cur
+            .get(seg)
+            .ok_or_else(|| format!("prefix '{prefix}' not found (missing segment '{seg}')"))?;
+    }
+    cur.as_table()
+        .ok_or_else(|| format!("prefix '{prefix}' is not a table"))
+}
+
+fn walk_to_table_json<'a>(
+    root: &'a serde_json::Value,
+    prefix: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, String> {
+    let mut cur = root;
+    for seg in prefix.split('.').filter(|s| !s.is_empty()) {
+        cur = cur
+            .get(seg)
+            .ok_or_else(|| format!("prefix '{prefix}' not found (missing segment '{seg}')"))?;
+    }
+    cur.as_object()
+        .ok_or_else(|| format!("prefix '{prefix}' is not an object"))
+}
+
 /// Run `cmd` in `dir` via `sh -c`; capture exit code + a bounded stdout tail.
 /// Exit 0 = pass, non-zero = fail (the cli maps the code to an outcome); a spawn
 /// failure becomes a `reason`. Read-only with respect to muster's own state.
@@ -250,6 +302,20 @@ mod tests {
         assert!(ok.reason.is_none());
         let bad = run_command("exit 3", &dir);
         assert_eq!(bad.exit_code, Some(3));
+    }
+
+    #[test]
+    fn list_keys_returns_sorted_requirement_ids() {
+        let d = TempDir::new().unwrap();
+        let p = write(
+            &d,
+            "m.toml",
+            "[requirements.R2]\ntitle = \"B\"\n[requirements.R1]\ntitle = \"A\"\n",
+        );
+        let keys = list_keys(&p, "requirements").unwrap();
+        assert_eq!(keys, vec!["R1".to_string(), "R2".to_string()]);
+        // missing prefix → Err naming the segment.
+        assert!(list_keys(&p, "nope").is_err());
     }
 
     #[test]
