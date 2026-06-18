@@ -133,12 +133,17 @@ impl Derived {
         }
     }
 
-    /// Green-eligible only when freshly derived with a non-failing outcome.
+    /// Green-eligible only when freshly derived **live** with a non-failing
+    /// outcome. A cache-served verdict (`served_from_cache == true`) is never
+    /// authority (#7): even within its freshness bound it can freeze a `Pass`
+    /// that outlives a now-failing source, so it is excluded here — `drift_profile`
+    /// already labels it `cached_command`; this makes that label actually gate green.
     pub fn is_green_eligible(&self) -> bool {
         matches!(
             self,
             Derived::Derived {
                 outcome: Outcome::Pass,
+                served_from_cache: false,
                 ..
             }
         )
@@ -237,6 +242,27 @@ mod tests {
         assert!(!stale.is_green_eligible());
         assert!(!Derived::Asserted.is_green_eligible());
         assert!(!Derived::Unresolved { reason: "x".into() }.is_green_eligible());
+    }
+
+    /// v2 honesty hole: a command-ref served from the opt-in cache (still within
+    /// its freshness bound, so it projects to `Derived` not `Stale`) carries a
+    /// frozen `Pass` that can outlive a now-failing source. A cache-served verdict
+    /// is NEVER authority (#7) — it must not be green-eligible.
+    #[test]
+    fn cache_served_pass_is_not_green_eligible() {
+        let cached_pass = Derived::Derived {
+            value: "pass".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 5,
+            served_from_cache: true,
+            source_age_secs: None,
+        };
+        assert!(
+            !cached_pass.is_green_eligible(),
+            "a cache-served Pass must not be green-eligible"
+        );
     }
 
     #[test]
