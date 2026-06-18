@@ -328,6 +328,16 @@ impl Store {
             .controls
             .get_mut(id)
             .ok_or_else(|| DomainError::nf("control", id, ADD_CONTROL_FIX))?;
+        // Honesty rule (mirror of ingest_check, SC-5): a reference-backed control
+        // derives its status from its source on read — it can NEVER be hand-set to
+        // forge a green while the source is failing.
+        if c.is_ref_backed() {
+            return Err(DomainError::RefBacked {
+                kind: "control",
+                id: id.to_string(),
+                fix: "its status is derived from its source — fix the source, then re-resolve with: muster control resolve <id>".to_string(),
+            });
+        }
         c.status = status;
         Ok(())
     }
@@ -903,6 +913,29 @@ mod tests {
             .ingest_check("p1", &cid, CheckResult::Pass, "t", None)
             .unwrap_err();
         assert!(matches!(err, DomainError::RefBacked { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn set_control_status_rejects_ref_backed_control() {
+        // Honesty rule (mirror of ingest_check): a ref-backed control's status is
+        // DERIVED from its source on read — it can NEVER be hand-set to forge a
+        // green while the source is failing.
+        let mut s = Store::default();
+        s.add_control("c1", "C", None, true).unwrap();
+        s.set_control_ref(
+            "c1",
+            Ref::FileAnchor {
+                path: "x.toml".into(),
+                anchor: "a.status".into(),
+            },
+        )
+        .unwrap();
+        let err = s
+            .set_control_status("c1", ControlStatus::Implemented)
+            .unwrap_err();
+        assert!(matches!(err, DomainError::RefBacked { .. }), "{err:?}");
+        // And the forged status was NOT persisted — the stored status is unchanged.
+        assert_eq!(s.control("c1").unwrap().status, ControlStatus::NotStarted);
     }
 
     #[test]
