@@ -42,11 +42,21 @@ pub enum Outcome {
     Unknown,
 }
 
-/// Map a resolved scalar to an outcome. A title string ("Four-layer architecture")
-/// ⇒ Unknown (title-only, no honesty claim); a status token ⇒ Pass/Fail.
+/// Map a resolved scalar to an outcome. Only an EXPLICIT verdict token derives a
+/// Pass/Fail; everything else — a title ("Four-layer architecture") OR a bare
+/// number — is `Unknown` (no honesty claim).
+///
+/// A bare number is a METRIC, not a verdict: muster cannot know whether higher
+/// or lower is "good" (`0` errors is green; `0`% coverage is RED), so mapping any
+/// number to Pass would FABRICATE a green from an ambiguous signal — the exact
+/// "show green when the source is red" lie this tool exists to prevent (#1). So
+/// numbers stay `Unknown`; a numeric source becomes a real verdict only with an
+/// explicit expectation (a threshold) or a boolean/verdict field. (The legit
+/// exit-code-0 = pass case is unambiguous and lives on the SEPARATE command
+/// path, `cli::resolve::resolve_command`, which maps `Some(0)` directly.)
 pub fn value_to_outcome(value: &str) -> Outcome {
     match value.trim().to_ascii_lowercase().as_str() {
-        "met" | "pass" | "passed" | "ok" | "true" | "green" | "0" => Outcome::Pass,
+        "met" | "pass" | "passed" | "ok" | "true" | "green" => Outcome::Pass,
         "unmet" | "not_met" | "fail" | "failed" | "false" | "red" => Outcome::Fail,
         _ => Outcome::Unknown,
     }
@@ -186,11 +196,32 @@ mod tests {
 
     #[test]
     fn value_to_outcome_maps_status_tokens() {
-        for v in ["met", "pass", "PASSED", " ok ", "true", "green", "0"] {
+        // Only EXPLICIT verdict tokens pass — NOT a bare `0` (see
+        // `bare_numbers_are_unknown_not_a_fabricated_pass`).
+        for v in ["met", "pass", "PASSED", " ok ", "true", "green"] {
             assert_eq!(value_to_outcome(v), Outcome::Pass, "{v} should pass");
         }
         for v in ["unmet", "not_met", "fail", "FAILED", "false", "red"] {
             assert_eq!(value_to_outcome(v), Outcome::Fail, "{v} should fail");
+        }
+    }
+
+    #[test]
+    fn bare_numbers_are_unknown_not_a_fabricated_pass() {
+        // THE honesty hole (dogfood 2026-06-19): a control pointing at a
+        // `coverage.percent` anchor resolving to `0` must NOT read green. A bare
+        // number is a METRIC, not a verdict — muster cannot know whether higher
+        // or lower is "good" (0 errors = good; 0% coverage = RED), so mapping any
+        // bare number to Pass FABRICATES a green from an ambiguous signal (#1).
+        // It is `Unknown` (honest "unverified"), never Pass. The legit
+        // exit-code-0 = pass case lives on the SEPARATE command path
+        // (`resolve_command`), which maps `Some(0)` directly — never via here.
+        for v in ["0", "0.0", " 0 ", "85", "42", "3.14", "-1", "100"] {
+            assert_eq!(
+                value_to_outcome(v),
+                Outcome::Unknown,
+                "a bare number ({v:?}) must be Unknown, never a fabricated Pass"
+            );
         }
     }
 
