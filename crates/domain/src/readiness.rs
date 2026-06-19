@@ -110,10 +110,21 @@ pub fn readiness_with(
     // Full coverage via exact integer equality (no float comparison): every
     // applicable control is implemented-with-evidence.
     let full_coverage = control_coverage.implemented_with_evidence == control_coverage.applicable;
+    // The headline counts EVERY readiness blocker, not just nonconformity
+    // `gap_findings`. A coverage shortfall or a refuting signal blocks READY too,
+    // so omitting them rendered "GAPS: 0" while a gap blocked readiness (dogfood
+    // 2026-06-19). Coverage uses the exact integer shortfall — the same quantity
+    // `full_coverage` tests — so when not READY this is provably ≥ 1 and the
+    // headline can never under-report a block as "GAPS: 0".
+    let blocking_gaps = gap_findings.len()
+        + refuting_signals.len()
+        + control_coverage
+            .applicable
+            .saturating_sub(control_coverage.implemented_with_evidence);
     let verdict = if gap_findings.is_empty() && refuting_signals.is_empty() && full_coverage {
         "READY".to_string()
     } else {
-        format!("GAPS: {}", gap_findings.len())
+        format!("GAPS: {blocking_gaps}")
     };
 
     Readiness {
@@ -704,6 +715,46 @@ mod tests {
         let r = readiness(&s, None);
         assert!(r.verdict.starts_with("GAPS:"));
         assert_eq!(r.verdict, format!("GAPS: {}", r.gap_findings.len()));
+    }
+
+    #[test]
+    fn verdict_counts_coverage_gaps_not_just_gap_findings() {
+        // THE headline-honesty hole (dogfood 2026-06-19): a control that is
+        // applicable but NOT implemented-with-evidence is a coverage gap that
+        // blocks READY — but it produces NO `gap_finding`, so the old count
+        // (`gap_findings.len()`) rendered "GAPS: 0" while a gap blocked
+        // readiness. The headline must count EVERY blocker: a coverage shortfall
+        // makes the count ≥ 1, never "GAPS: 0" while not READY.
+        let mut s = base();
+        s.add_risk("p1", "r").unwrap();
+        s.add_metric("p1", "m").unwrap();
+        // Applicable control, linked, but NOT implemented-with-evidence → a
+        // coverage gap with zero gap_findings.
+        s.add_control("c1", "C", None, true).unwrap();
+        s.link_control("p1", "c1").unwrap();
+        s.set_process_status("p1", ProcessStatus::Active).unwrap();
+        let r = readiness(&s, None);
+        assert_eq!(
+            r.gap_findings.len(),
+            0,
+            "no nonconformity gap_findings here"
+        );
+        assert!(
+            !r.control_coverage.gaps.is_empty(),
+            "the uncovered control IS a coverage gap"
+        );
+        assert_ne!(
+            r.verdict, "GAPS: 0",
+            "the headline must NOT read GAPS: 0 while a coverage gap blocks readiness"
+        );
+        assert_ne!(r.verdict, "READY");
+        // The count includes the coverage shortfall.
+        let shortfall =
+            r.control_coverage.applicable - r.control_coverage.implemented_with_evidence;
+        assert_eq!(
+            r.verdict,
+            format!("GAPS: {}", r.gap_findings.len() + shortfall)
+        );
     }
 
     #[test]
