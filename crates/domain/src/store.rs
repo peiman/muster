@@ -906,6 +906,7 @@ mod tests {
             Ref::FileAnchor {
                 path: "x.toml".into(),
                 anchor: "a.status".into(),
+                expect: None,
             },
         )
         .unwrap();
@@ -927,6 +928,7 @@ mod tests {
             Ref::FileAnchor {
                 path: "x.toml".into(),
                 anchor: "a.status".into(),
+                expect: None,
             },
         )
         .unwrap();

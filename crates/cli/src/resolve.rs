@@ -28,12 +28,19 @@ pub fn resolve(r: &Ref, now_iso: &str) -> Resolution {
 /// command/note refs (no single source file) and for unresolved file anchors.
 fn resolve_meta(r: &Ref, now_iso: &str) -> (Resolution, Option<i64>) {
     match r {
-        Ref::FileAnchor { path, anchor } => {
+        Ref::FileAnchor {
+            path,
+            anchor,
+            expect,
+        } => {
             let fr = resolver::resolve_file_anchor(path, anchor);
             let mtime = fr.source_mtime_epoch;
             match fr.value {
                 Some(value) => {
-                    let outcome = domain::value_to_outcome(&value);
+                    // Apply the control's numeric expectation (if any): a number
+                    // vs the bar derives an honest Pass/Fail; without one a bare
+                    // number stays Unknown (never a fabricated verdict).
+                    let outcome = domain::value_to_outcome_with_expect(&value, expect.as_ref());
                     (
                         Resolution::Resolved {
                             value,

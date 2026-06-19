@@ -328,7 +328,7 @@ fn render_view(output: &Output, command: &str, control: &Control, next: String) 
 /// (`Unresolved`). Notes / no-ref are always allowed.
 fn validate_ref_at_store_time(r: &Option<Ref>, id: &str) -> Result<(), Box<dyn std::error::Error>> {
     match r {
-        Some(rf @ Ref::FileAnchor { path, anchor }) => {
+        Some(rf @ Ref::FileAnchor { path, anchor, .. }) => {
             if let Resolution::Unresolved { reason } = resolve::resolve(rf, &store::now_iso()) {
                 return Err(format!(
                     "refusing to add '{id}': the file_anchor does not resolve — {reason}. Fix the source file '{path}' or the anchor '{anchor}', then retry (no control was created)."

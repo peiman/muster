@@ -85,6 +85,9 @@ pub fn execute(
         let r = Ref::FileAnchor {
             path: manifest.to_string(),
             anchor,
+            // Imported refs carry no acceptance criterion (a manifest of titles,
+            // not metrics); a threshold is added per-control via `--expect`.
+            expect: None,
         };
         // Title is a fallback only; the ref is the authority. Use the slug as the
         // placeholder so a not-yet-resolved render is still legible.

@@ -806,6 +806,7 @@ mod tests {
         c.r#ref = Some(Ref::FileAnchor {
             path: "x.toml".into(),
             anchor: "a.title".into(),
+            expect: None,
         });
         let d = Derived::Derived {
             value: "Alpha".into(),
@@ -898,6 +899,7 @@ mod tests {
             r#ref: Some(Ref::FileAnchor {
                 path: "x.toml".into(),
                 anchor: "a.status".into(),
+                expect: None,
             }),
             resolved: None,
         };

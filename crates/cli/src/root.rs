@@ -35,12 +35,26 @@ pub struct RefFlags {
         conflicts_with_all = ["ref_file", "ref_cmd", "ref_note"]
     )]
     pub ref_report: Option<Vec<String>>,
+    /// file_anchor acceptance criterion: a numeric bar that turns the resolved
+    /// number into an honest Pass/Fail (e.g. `--expect ">=80"` for coverage).
+    /// Without it a bare number stays `Unknown` (muster never guesses whether
+    /// higher or lower is "good"). Comparators: `>= <= > < ==`. Applies only to
+    /// a file_anchor (`--ref-file`/`--ref-report`).
+    #[arg(long = "expect", conflicts_with_all = ["ref_cmd", "ref_note"])]
+    pub expect: Option<String>,
 }
 
 impl RefFlags {
     /// Build the `Ref` these flags describe, or `None` when no ref kind was given.
     /// Returns `Err` only on a half-specified file/command pair clap can't catch.
     pub fn to_ref(&self) -> Result<Option<Ref>, String> {
+        // Parse the optional numeric acceptance criterion once (honest error on
+        // bad syntax). Only meaningful for a file_anchor; clap already conflicts
+        // it with cmd/note.
+        let expect = match &self.expect {
+            Some(s) => Some(domain::Expectation::parse(s)?),
+            None => None,
+        };
         if let Some(report) = &self.ref_report {
             // clap's `num_args = 2` guarantees exactly two values when present.
             let path = report
@@ -51,7 +65,11 @@ impl RefFlags {
                 .get(1)
                 .ok_or("--ref-report requires <PATH> <ANCHOR>")?
                 .clone();
-            return Ok(Some(Ref::FileAnchor { path, anchor }));
+            return Ok(Some(Ref::FileAnchor {
+                path,
+                anchor,
+                expect,
+            }));
         }
         if let Some(path) = &self.ref_file {
             let anchor = self
@@ -61,6 +79,7 @@ impl RefFlags {
             Ok(Some(Ref::FileAnchor {
                 path: path.clone(),
                 anchor,
+                expect,
             }))
         } else if let Some(cmd) = &self.ref_cmd {
             let dir = self.ref_dir.clone().ok_or("--ref-cmd requires --ref-dir")?;

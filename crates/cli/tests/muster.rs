@@ -552,6 +552,63 @@ fn sc3_title_is_a_resolved_projection() {
 }
 
 #[test]
+fn expect_turns_a_numeric_metric_into_an_honest_live_verdict() {
+    // The numeric-threshold evolution (dogfood 2026-06-19): a bare number is
+    // Unknown, but `--expect ">=80"` makes it an honest Pass/Fail — and it stays
+    // LIVE (editing the source flips the verdict on read, no muster mutation).
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let src = write_src(&tmp, "coverage.json", "{\"percent\": 85}\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "cov",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "percent",
+            "--expect",
+            ">=80",
+        ],
+    );
+    let c = data(&d, &["control", "show", "cov"]);
+    assert_eq!(
+        c["resolution"]["outcome"], "pass",
+        "85 ≥ 80 → pass, got {c}"
+    );
+
+    // Drop coverage below the bar → Fail on the next read (live glue, no mutation).
+    std::fs::write(&src, "{\"percent\": 50}\n").unwrap();
+    let c2 = data(&d, &["control", "show", "cov"]);
+    assert_eq!(
+        c2["resolution"]["outcome"], "fail",
+        "50 < 80 → fail on read, got {c2}"
+    );
+    let r = data(&d, &["readiness"]);
+    assert_ne!(r["verdict"], "READY", "below the bar must not read READY");
+
+    // A malformed --expect is an honest error, never a silent pass.
+    let (ok, _v) = run_json(
+        &d,
+        &[
+            "control",
+            "add",
+            "bad",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "percent",
+            "--expect",
+            "80",
+        ],
+    );
+    assert!(!ok, "a malformed --expect must fail, not silently succeed");
+}
+
+#[test]
 fn title_is_optional_when_a_ref_is_supplied() {
     // Tidy (SPEC P0 — "title as a resolved projection"): when a ref backs the
     // control, the title is DERIVED, so `--title` is an optional fallback. The

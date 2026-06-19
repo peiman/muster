@@ -17,7 +17,15 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ref {
     /// Read a scalar at a dotted anchor in a TOML or JSON file. The PRIMARY glue.
-    FileAnchor { path: String, anchor: String },
+    /// An optional numeric [`Expectation`] turns the resolved number into an
+    /// honest Pass/Fail (e.g. `coverage.percent >= 80`); absent, a bare number
+    /// stays `Unknown`. `#[serde(default)]` keeps pre-expectation stores readable.
+    FileAnchor {
+        path: String,
+        anchor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expect: Option<Expectation>,
+    },
     /// Run a command in a dir; exit 0 = pass, non-zero = fail. Use sparingly.
     Command { cmd: String, dir: String },
     /// Opaque/manual — always surfaced as *asserted*, never proven.
@@ -59,6 +67,109 @@ pub fn value_to_outcome(value: &str) -> Outcome {
         "met" | "pass" | "passed" | "ok" | "true" | "green" => Outcome::Pass,
         "unmet" | "not_met" | "fail" | "failed" | "false" | "red" => Outcome::Fail,
         _ => Outcome::Unknown,
+    }
+}
+
+/// A comparator for a numeric [`Expectation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparator {
+    Ge,
+    Le,
+    Gt,
+    Lt,
+    Eq,
+}
+
+/// The acceptance criterion that turns a numeric source into an honest verdict.
+/// A control points at a metric (e.g. `coverage.percent`) and declares the bar
+/// (`>= 80`); muster resolves the number on read and derives Pass/Fail by
+/// applying the comparator — NOT by guessing whether higher or lower is "good"
+/// (the bare-number honesty hole). The criterion is explicit, so no green is
+/// fabricated (#1). `f64` ⇒ `PartialEq` only (no `Eq`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Expectation {
+    pub op: Comparator,
+    pub threshold: f64,
+}
+
+impl Expectation {
+    /// Whether a resolved number satisfies the criterion.
+    ///
+    /// The `Eq` arm is an EXACT `f64` comparison by design: `==` is the user's
+    /// explicit, literal choice (e.g. `failed_checks == 0`, `open_incidents ==
+    /// 0` — integer-valued counts that are exact in `f64`). muster honors what
+    /// was written; a tolerance would silently widen the bar. For a measured
+    /// float a user picks a range (`>= 79.5`) instead. Hence the `float_cmp`
+    /// allow — it is correct here, not an oversight.
+    #[allow(clippy::float_cmp)]
+    pub fn satisfied_by(&self, n: f64) -> bool {
+        match self.op {
+            Comparator::Ge => n >= self.threshold,
+            Comparator::Le => n <= self.threshold,
+            Comparator::Gt => n > self.threshold,
+            Comparator::Lt => n < self.threshold,
+            Comparator::Eq => n == self.threshold,
+        }
+    }
+
+    /// Parse an expectation string: `>= 80`, `<=5`, `> 0`, `<10`, `== 100`
+    /// (`=` is accepted as `==`). Whitespace-tolerant. A non-finite or
+    /// unparseable threshold is rejected (an honest error beats a silent NaN
+    /// comparison that would always fail).
+    pub fn parse(s: &str) -> Result<Expectation, String> {
+        let s = s.trim();
+        let (op, rest) = if let Some(r) = s.strip_prefix(">=") {
+            (Comparator::Ge, r)
+        } else if let Some(r) = s.strip_prefix("<=") {
+            (Comparator::Le, r)
+        } else if let Some(r) = s.strip_prefix("==") {
+            (Comparator::Eq, r)
+        } else if let Some(r) = s.strip_prefix('>') {
+            (Comparator::Gt, r)
+        } else if let Some(r) = s.strip_prefix('<') {
+            (Comparator::Lt, r)
+        } else if let Some(r) = s.strip_prefix('=') {
+            (Comparator::Eq, r)
+        } else {
+            return Err(format!(
+                "expectation must start with one of >= <= > < == (got {s:?})"
+            ));
+        };
+        let threshold: f64 = rest.trim().parse().map_err(|_| {
+            format!(
+                "expectation threshold must be a number (got {:?})",
+                rest.trim()
+            )
+        })?;
+        if !threshold.is_finite() {
+            return Err(format!(
+                "expectation threshold must be finite (got {threshold})"
+            ));
+        }
+        Ok(Expectation { op, threshold })
+    }
+}
+
+/// Map a resolved scalar to an outcome, applying an optional numeric
+/// [`Expectation`]. With an expectation the value is parsed as a number and the
+/// comparator decides Pass/Fail; a non-numeric / non-finite value can't be
+/// honestly compared to a numeric bar, so it is `Unknown` (never a fabricated
+/// verdict). With no expectation this is exactly [`value_to_outcome`] (explicit
+/// verdict tokens pass; bare numbers stay `Unknown`).
+pub fn value_to_outcome_with_expect(value: &str, expect: Option<&Expectation>) -> Outcome {
+    match expect {
+        Some(e) => match value.trim().parse::<f64>() {
+            Ok(n) if n.is_finite() => {
+                if e.satisfied_by(n) {
+                    Outcome::Pass
+                } else {
+                    Outcome::Fail
+                }
+            }
+            _ => Outcome::Unknown,
+        },
+        None => value_to_outcome(value),
     }
 }
 
@@ -226,6 +337,56 @@ mod tests {
     }
 
     #[test]
+    fn expectation_parses_comparators_and_rejects_garbage() {
+        assert_eq!(
+            Expectation::parse(">= 80").unwrap(),
+            Expectation {
+                op: Comparator::Ge,
+                threshold: 80.0
+            }
+        );
+        assert_eq!(Expectation::parse("<=5").unwrap().op, Comparator::Le);
+        assert_eq!(Expectation::parse("> 0").unwrap().op, Comparator::Gt);
+        assert_eq!(Expectation::parse("<10").unwrap().op, Comparator::Lt);
+        assert_eq!(Expectation::parse("== 100").unwrap().op, Comparator::Eq);
+        assert_eq!(Expectation::parse("= 1").unwrap().op, Comparator::Eq);
+        assert!(Expectation::parse("80").is_err());
+        assert!(Expectation::parse(">= abc").is_err());
+        assert!(Expectation::parse(">= inf").is_err());
+        assert!(Expectation::parse("").is_err());
+    }
+
+    #[test]
+    fn value_to_outcome_with_expect_derives_an_honest_numeric_verdict() {
+        let ge80 = Expectation::parse(">=80").unwrap();
+        assert_eq!(
+            value_to_outcome_with_expect("85", Some(&ge80)),
+            Outcome::Pass
+        );
+        assert_eq!(
+            value_to_outcome_with_expect("0", Some(&ge80)),
+            Outcome::Fail
+        );
+        assert_eq!(
+            value_to_outcome_with_expect("80", Some(&ge80)),
+            Outcome::Pass,
+            "boundary is inclusive for >="
+        );
+        // A non-numeric source can't honestly meet a numeric bar → Unknown.
+        assert_eq!(
+            value_to_outcome_with_expect("passed", Some(&ge80)),
+            Outcome::Unknown
+        );
+        assert_eq!(
+            value_to_outcome_with_expect("NaN", Some(&ge80)),
+            Outcome::Unknown
+        );
+        // No expectation → exactly value_to_outcome (bare number stays Unknown).
+        assert_eq!(value_to_outcome_with_expect("85", None), Outcome::Unknown);
+        assert_eq!(value_to_outcome_with_expect("pass", None), Outcome::Pass);
+    }
+
+    #[test]
     fn value_to_outcome_title_and_garbage_are_unknown() {
         assert_eq!(
             value_to_outcome("Four-layer architecture"),
@@ -301,6 +462,7 @@ mod tests {
         let file = Ref::FileAnchor {
             path: "x.toml".into(),
             anchor: "a.b".into(),
+            expect: None,
         };
         let cmd = Ref::Command {
             cmd: "true".into(),
@@ -351,7 +513,8 @@ mod tests {
         assert!(
             !Ref::FileAnchor {
                 path: "x.toml".into(),
-                anchor: "a.b".into()
+                anchor: "a.b".into(),
+                expect: None,
             }
             .is_cached_kind()
         );
@@ -362,6 +525,7 @@ mod tests {
         let r = Ref::FileAnchor {
             path: "x.toml".into(),
             anchor: "a.b".into(),
+            expect: None,
         };
         let j = serde_json::to_value(&r).unwrap();
         assert_eq!(j["kind"], "file_anchor");

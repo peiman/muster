@@ -44,6 +44,10 @@ const INTENTS: &[(&str, &str)] = &[
         "muster control add <id> --ref-report <result.json> <dotted.anchor>",
     ),
     (
+        "Hold a numeric metric to a bar (a number becomes an honest Pass/Fail, not Unknown)",
+        "muster control add <id> --ref-file <path> --ref-anchor <coverage.percent> --expect \">=80\"",
+    ),
+    (
         "Re-resolve a reference (refresh the cached resolution)",
         "muster control resolve <id>",
     ),
