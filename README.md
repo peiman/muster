@@ -74,6 +74,26 @@ muster explain                                # intent -> command map (no manual
 Every command supports `--output json` whose fields mirror the human text exactly
 (dual surface, one source of truth). Exit codes are honest; errors name the fix.
 
+## Configuration (environment)
+
+muster is zero-config; these env knobs only tune honesty/freshness policy:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `MUSTER_DATA_DIR` | `./.muster` | Where the file-per-entity store lives. |
+| `MUSTER_FRESHNESS_SECS` | `86400` | How long a *cached command* verdict stays fresh before it projects `stale`. `0` ⇒ never trust a cache. |
+| `MUSTER_CMD_CACHE` | off | Opt in to serving cached command-ref verdicts (for genuinely expensive commands). The honest default re-resolves command refs **live** on every read. When on, `readiness` and `control resolve --all` **warn** that verdicts may be stale. |
+| `MUSTER_SOURCE_FRESHNESS_SECS` | unset | Opt-in source-age bound: a `file_anchor` whose pointed-at artifact's mtime is older than this is flagged `ref_source_stale` and held back from coverage — a confident `met` can't hide a file nobody regenerated. Unset ⇒ no source-age gating. |
+
+Two honesty rules worth knowing up front:
+
+- **A bare number is not a verdict.** A control pointing at a metric (e.g.
+  `coverage.percent`) stays `unknown` until you give it an expectation
+  (`--expect ">=80"`); muster won't guess whether higher or lower is "good".
+- **A note proves nothing.** A hand-set control counts toward READY only with a
+  *verifying* artifact (`file`/`url`) — a `note` is honor-level and surfaces a
+  `control_honor_evidence` gap until you attach real evidence or point a ref.
+
 ## Examples
 
 - [`examples/ckeletin-feedback/`](examples/ckeletin-feedback/) — a worked,
