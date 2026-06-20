@@ -245,8 +245,9 @@ fn control_coverage(
             // artifact is older than the (opt-in) source-freshness bound is NOT
             // fresh coverage — the verdict is live but derives from an
             // un-regenerated file (#1, b2). `None` bound ⇒ this never bites.
-            let stale_source = d.is_green_eligible() && d.source_is_stale(source_freshness_secs);
-            if d.is_green_eligible() && !stale_source {
+            let green = d.is_green_eligible();
+            let stale_source = green && d.source_is_stale(source_freshness_secs);
+            if green && !stale_source {
                 implemented_with_evidence += 1;
             } else {
                 let reason = if stale_source {
@@ -321,7 +322,7 @@ fn proven_vs_asserted(store: &Store, in_scope: &BTreeSet<String>) -> (Vec<String
         }
         // Honor path (v3.1): a note-only assertion does not prove a process —
         // proven requires a verifying artifact (file/url), not just "trust me".
-        let has_evidence = crate::model::has_verifying_evidence(&p.evidence);
+        let has_verifying = crate::model::has_verifying_evidence(&p.evidence);
         let open_incident = store
             .incidents
             .values()
@@ -334,7 +335,7 @@ fn proven_vs_asserted(store: &Store, in_scope: &BTreeSet<String>) -> (Vec<String
             .checks
             .iter()
             .any(|c| c.last_result == crate::model::CheckResult::Fail);
-        if has_evidence && !open_incident && !open_nc && !failed_check {
+        if has_verifying && !open_incident && !open_nc && !failed_check {
             proven.push(pid.clone());
         } else {
             asserted.push(pid.clone());
@@ -815,6 +816,38 @@ mod tests {
             "a source-stale finding must name the control"
         );
         assert_ne!(r.verdict, "READY");
+    }
+
+    #[test]
+    fn failing_source_that_is_also_stale_yields_ref_failing_not_double_fire() {
+        // The ref_source_stale arm is gated on is_green_eligible(), so a control
+        // whose source FAILS (and is also old) reports `ref_failing` only — it
+        // must NOT also emit `ref_source_stale` (no double-flag on the same
+        // control across two axes). The Fail already blocks readiness.
+        use crate::reference::{Derived, Outcome};
+        let mut s = base();
+        s.add_control("c1", "C1", None, true).unwrap();
+        let failing_and_old = Derived::Derived {
+            value: "0".into(),
+            outcome: Outcome::Fail,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: Some(1000),
+        };
+        let mut index = BTreeMap::new();
+        index.insert("c1".to_string(), failing_and_old);
+
+        let r = readiness_with(&s, None, &index, Some(600));
+        assert!(
+            r.gap_findings.iter().any(|g| g.kind == "ref_failing"),
+            "a failing source is a ref_failing gap"
+        );
+        assert!(
+            !r.gap_findings.iter().any(|g| g.kind == "ref_source_stale"),
+            "a non-green (failing) projection must NOT also emit ref_source_stale"
+        );
     }
 
     #[test]

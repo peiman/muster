@@ -1399,6 +1399,18 @@ fn b3_resolve_all_warns_in_cmd_cache_mode() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
     init(&d);
+    // default (no cache mode): flag false, no warning in the human surface.
+    let off = data(&d, &["control", "resolve", "--all"]);
+    assert_eq!(off["cmd_cache_mode"], false);
+    let plain = muster(&d)
+        .args(["control", "resolve", "--all", "--output", "text"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("command-cache mode"),
+        "default must not warn"
+    );
+
     let out = muster(&d)
         .env("MUSTER_CMD_CACHE", "1")
         .args(["control", "resolve", "--all", "--output", "json"])

@@ -82,12 +82,19 @@ muster control show a8-29        # outcome: fail (70 < 80) — instantly, no mus
 ```
 
 **2. Evidence can't go quietly stale.** Set an opt-in source-freshness bound and a
-control whose evidence artifact is too old is flagged `ref_source_stale` — a
-confident `met` from a report nobody regenerated since last year doesn't pass:
+control whose evidence *artifact* is too old is flagged `ref_source_stale` — a
+confident `met` from a report nobody regenerated doesn't pass. (On a fresh setup
+the files are new, so back-date one to see it bite — that's the auditor's "when
+was this last produced?"):
 
 ```sh
-MUSTER_SOURCE_FRESHNESS_SECS=86400 muster readiness   # a year-old coverage.json → a8-29 ref_source_stale
+touch -t 202001010000 evidence/coverage.json          # pretend it's from 2020
+MUSTER_SOURCE_FRESHNESS_SECS=86400 muster readiness    # → a8-29 ref_source_stale, dropped from coverage
 ```
+
+This is a different axis from teeth #1: the *verdict* still resolves live
+(`drift profile: a8-29 — live_resolved`), but the *source file* is stale — so the
+gap finding holds it back even though the number would pass.
 
 **3. muster is an optional view.** The same bars enforce in CI with no muster at
 all — `./ci-check.sh` reads the very same evidence files and fails the build if
