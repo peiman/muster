@@ -231,6 +231,18 @@ str_enum! {
     } default = Note
 }
 
+impl EvidenceKind {
+    /// Whether this kind is *verifying* — it points at an inspectable artifact
+    /// (`file`/`url`) — versus *honor-level* (`note`: an unverified "I did it"
+    /// assertion). The honesty seam (#1): a note alone never proves coverage,
+    /// symmetric with how a note *ref* projects to `Asserted` and is never
+    /// green-eligible. `readiness` requires at least one verifying evidence
+    /// before counting a hand-set control as implemented-with-evidence.
+    pub fn is_verifying(&self) -> bool {
+        matches!(self, EvidenceKind::File | EvidenceKind::Url)
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Evidence
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +252,13 @@ str_enum! {
 pub struct Evidence {
     pub kind: EvidenceKind,
     pub value: String,
+}
+
+/// `true` when at least one attached evidence is *verifying* (a file/url
+/// artifact), not merely an honor-level note. The SSOT predicate `readiness`
+/// uses to keep a note-only claim off the READY headline (#1). Empty ⇒ false.
+pub fn has_verifying_evidence(evidence: &[Evidence]) -> bool {
+    evidence.iter().any(|e| e.kind.is_verifying())
 }
 
 impl fmt::Display for Evidence {
@@ -730,6 +749,34 @@ mod tests {
         assert!(Enforcement::Lint.rank() > Enforcement::Script.rank());
         assert!(Enforcement::Script.rank() > Enforcement::Ci.rank());
         assert!(Enforcement::Ci.rank() > Enforcement::Honor.rank());
+    }
+
+    #[test]
+    fn evidence_kind_verifying_vs_honor_level() {
+        // A file/url points at an inspectable artifact (verifying); a note is an
+        // honor-level assertion ("I did it, trust me"). Symmetric with how a
+        // note *ref* projects to `Asserted` — never alone proves coverage (#1).
+        assert!(EvidenceKind::File.is_verifying());
+        assert!(EvidenceKind::Url.is_verifying());
+        assert!(!EvidenceKind::Note.is_verifying());
+    }
+
+    #[test]
+    fn has_verifying_evidence_requires_a_non_note_artifact() {
+        let note = |v: &str| Evidence {
+            kind: EvidenceKind::Note,
+            value: v.into(),
+        };
+        let file = Evidence {
+            kind: EvidenceKind::File,
+            value: "report.json".into(),
+        };
+        // empty ⇒ none.
+        assert!(!has_verifying_evidence(&[]));
+        // note-only ⇒ honor-level, not verifying.
+        assert!(!has_verifying_evidence(&[note("did it"), note("really")]));
+        // at least one file/url ⇒ verifying (mixed is fine).
+        assert!(has_verifying_evidence(&[note("did it"), file]));
     }
 
     #[test]

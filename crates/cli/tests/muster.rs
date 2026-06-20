@@ -126,8 +126,9 @@ fn dod_full_spine() {
             "control",
             "attach-evidence",
             "a5-24",
-            "note",
-            "runbook approved",
+            // a verifying artifact: note-only is honor-level and no longer covers (v3.1).
+            "file",
+            "runbook.md",
         ],
     );
     let c = data(&d, &["control", "show", "a5-24"]);
@@ -293,7 +294,11 @@ fn readiness_moves() {
     data(&d, &["process", "add", "p1", "--name", "P1"]);
     data(&d, &["control", "add", "c1", "--title", "C1"]);
     data(&d, &["control", "set-status", "c1", "implemented"]);
-    data(&d, &["control", "attach-evidence", "c1", "note", "x"]);
+    // a verifying artifact: note-only is honor-level and no longer covers (v3.1).
+    data(
+        &d,
+        &["control", "attach-evidence", "c1", "file", "evidence.txt"],
+    );
 
     let before = data(&d, &["readiness"]);
     assert_eq!(before["control_coverage"]["percent"], 100.0);

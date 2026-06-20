@@ -235,15 +235,21 @@ fn control_coverage(
             }
             continue;
         }
-        let has_evidence = !c.evidence.is_empty();
-        if c.status == ControlStatus::Implemented && has_evidence {
+        // STRICT honor path (v3.1): a note-only assertion is honor-level and does
+        // NOT prove coverage; at least one *verifying* artifact (file/url) is
+        // required (#1, symmetric with a note ref → Asserted, never green).
+        let has_verifying = crate::model::has_verifying_evidence(&c.evidence);
+        if c.status == ControlStatus::Implemented && has_verifying {
             implemented_with_evidence += 1;
         } else {
-            let reason = match (c.status, has_evidence) {
-                (ControlStatus::Implemented, false) => {
+            let reason = match (c.status, c.evidence.is_empty(), has_verifying) {
+                (ControlStatus::Implemented, true, _) => {
                     "implemented but has no evidence".to_string()
                 }
-                (status, _) => format!("status is {status}, not implemented-with-evidence"),
+                (ControlStatus::Implemented, false, false) => {
+                    "implemented but evidence is honor-level (note only) — attach a file/url artifact or point a ref".to_string()
+                }
+                (status, _, _) => format!("status is {status}, not implemented-with-evidence"),
             };
             gaps.push(CoverageGap {
                 id: id.clone(),
@@ -287,7 +293,9 @@ fn proven_vs_asserted(store: &Store, in_scope: &BTreeSet<String>) -> (Vec<String
         if p.status != ProcessStatus::Active {
             continue;
         }
-        let has_evidence = !p.evidence.is_empty();
+        // Honor path (v3.1): a note-only assertion does not prove a process —
+        // proven requires a verifying artifact (file/url), not just "trust me".
+        let has_evidence = crate::model::has_verifying_evidence(&p.evidence);
         let open_incident = store
             .incidents
             .values()
@@ -479,16 +487,27 @@ fn gap_findings(
             });
         }
     }
-    // Controls implemented but evidence-less (in scope).
+    // Controls implemented but with no — or only honor-level — evidence (in
+    // scope). An empty-evidence control is `control_no_evidence`; a note-only
+    // control is `control_honor_evidence` (v3.1 strict honor path: a note proves
+    // nothing — name the verifying-artifact fix).
     let scoped_control =
         |id: &str| -> bool { scope.is_none() || applicable_in_scope(store, scope, in_scope, id) };
     for c in store.controls.values() {
-        if c.status == ControlStatus::Implemented && c.evidence.is_empty() && scoped_control(&c.id)
-        {
+        if c.status != ControlStatus::Implemented || !scoped_control(&c.id) {
+            continue;
+        }
+        if c.evidence.is_empty() {
             out.push(GapFinding {
                 kind: "control_no_evidence".into(),
                 subject_id: c.id.clone(),
                 message: format!("control '{}' is implemented but has no evidence — attach: muster control attach-evidence {} <kind> <value>", c.id, c.id),
+            });
+        } else if !crate::model::has_verifying_evidence(&c.evidence) {
+            out.push(GapFinding {
+                kind: "control_honor_evidence".into(),
+                subject_id: c.id.clone(),
+                message: format!("control '{}' is implemented but its only evidence is a note (honor-level) — attach a file/url artifact: muster control attach-evidence {} file <path>", c.id, c.id),
             });
         }
     }
@@ -629,7 +648,7 @@ mod tests {
         s.attach_control_evidence(
             "c1",
             Evidence {
-                kind: EvidenceKind::Note,
+                kind: EvidenceKind::File, // verifying artifact (note-only no longer counts)
                 value: "x".into(),
             },
         )
@@ -643,6 +662,92 @@ mod tests {
     }
 
     #[test]
+    fn note_only_evidence_does_not_satisfy_coverage() {
+        // STRICT honor path (v3.1): a hand-set control marked Implemented whose
+        // ONLY evidence is a note is honor-level — it must NOT count as
+        // implemented-with-evidence (symmetric with a note *ref* → Asserted,
+        // never green). It is a coverage gap until a file/url artifact (or a ref)
+        // is attached, and surfaces a `control_honor_evidence` finding naming the fix.
+        let mut s = base();
+        s.add_control("c1", "C1", None, true).unwrap();
+        s.set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            "c1",
+            Evidence {
+                kind: EvidenceKind::Note,
+                value: "did it".into(),
+            },
+        )
+        .unwrap();
+        let r = readiness(&s, None);
+        assert_eq!(
+            r.control_coverage.implemented_with_evidence, 0,
+            "note-only is honor-level, not verified evidence"
+        );
+        assert!(r.control_coverage.gaps.iter().any(|g| g.id == "c1"));
+        assert!(
+            r.gap_findings
+                .iter()
+                .any(|g| g.kind == "control_honor_evidence" && g.subject_id == "c1"),
+            "an honor-evidence finding must name the fix"
+        );
+    }
+
+    #[test]
+    fn file_evidence_satisfies_coverage() {
+        // The honor path only bites notes: a verifying artifact (file/url) counts.
+        let mut s = base();
+        s.add_control("c1", "C1", None, true).unwrap();
+        s.set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            "c1",
+            Evidence {
+                kind: EvidenceKind::File,
+                value: "report.json".into(),
+            },
+        )
+        .unwrap();
+        let r = readiness(&s, None);
+        assert_eq!(r.control_coverage.implemented_with_evidence, 1);
+        assert!(
+            !r.gap_findings
+                .iter()
+                .any(|g| g.kind == "control_honor_evidence"),
+            "a file artifact is verifying — no honor finding"
+        );
+    }
+
+    #[test]
+    fn note_only_process_evidence_is_asserted_not_proven() {
+        let mut s = base();
+        s.set_process_status("p1", ProcessStatus::Active).unwrap();
+        s.attach_process_evidence(
+            "p1",
+            Evidence {
+                kind: EvidenceKind::Note,
+                value: "trust me".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            readiness(&s, None).asserted.contains(&"p1".to_string()),
+            "note-only process evidence ⇒ asserted, not proven"
+        );
+        // a verifying artifact promotes it to proven.
+        s.attach_process_evidence(
+            "p1",
+            Evidence {
+                kind: EvidenceKind::File,
+                value: "log.txt".into(),
+            },
+        )
+        .unwrap();
+        assert!(readiness(&s, None).proven.contains(&"p1".to_string()));
+    }
+
+    #[test]
     fn proven_requires_evidence_and_no_refuting() {
         let mut s = base();
         s.set_process_status("p1", ProcessStatus::Active).unwrap();
@@ -651,7 +756,7 @@ mod tests {
         s.attach_process_evidence(
             "p1",
             Evidence {
-                kind: EvidenceKind::Note,
+                kind: EvidenceKind::File, // verifying artifact (note-only no longer proves)
                 value: "v".into(),
             },
         )
@@ -770,7 +875,7 @@ mod tests {
         s.attach_control_evidence(
             "c1",
             Evidence {
-                kind: EvidenceKind::Note,
+                kind: EvidenceKind::File, // verifying artifact (note-only no longer counts)
                 value: "x".into(),
             },
         )
