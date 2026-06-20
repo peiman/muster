@@ -120,15 +120,18 @@ fn dod_full_spine() {
     );
     data(&d, &["process", "link-control", "incident-mgmt", "a5-24"]);
     data(&d, &["control", "set-status", "a5-24", "implemented"]);
+    // honor-VERIFIED (b1): a `file` evidence counts only if it RESOLVES. Create a
+    // real artifact and attach it by absolute path so coverage is honestly 100%.
+    let runbook = tmp.path().join("runbook.md");
+    std::fs::write(&runbook, b"runbook\n").unwrap();
     data(
         &d,
         &[
             "control",
             "attach-evidence",
             "a5-24",
-            // a verifying artifact: note-only is honor-level and no longer covers (v3.1).
             "file",
-            "runbook.md",
+            runbook.to_str().unwrap(),
         ],
     );
     let c = data(&d, &["control", "show", "a5-24"]);
@@ -294,10 +297,19 @@ fn readiness_moves() {
     data(&d, &["process", "add", "p1", "--name", "P1"]);
     data(&d, &["control", "add", "c1", "--title", "C1"]);
     data(&d, &["control", "set-status", "c1", "implemented"]);
-    // a verifying artifact: note-only is honor-level and no longer covers (v3.1).
+    // honor-VERIFIED (b1): a verifying artifact counts only if it RESOLVES — create
+    // a real file and attach it by absolute path so coverage is honestly 100%.
+    let evidence = tmp.path().join("evidence.txt");
+    std::fs::write(&evidence, b"evidence\n").unwrap();
     data(
         &d,
-        &["control", "attach-evidence", "c1", "file", "evidence.txt"],
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            evidence.to_str().unwrap(),
+        ],
     );
 
     let before = data(&d, &["readiness"]);
@@ -315,6 +327,147 @@ fn readiness_moves() {
     assert_ne!(
         before["control_coverage"]["percent"],
         after["control_coverage"]["percent"]
+    );
+}
+
+/// b1 honor-VERIFIED (THE false-pass guard) — a control whose ONLY evidence is a
+/// non-existent file is NOT covered, and readiness surfaces a gap that NAMES the
+/// missing artifact + the fix command.
+#[test]
+fn missing_file_evidence_is_a_gap_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            "does-not-exist.pdf",
+        ],
+    );
+    let r = data(&d, &["readiness"]);
+    assert_eq!(
+        r["control_coverage"]["implemented_with_evidence"], 0,
+        "a missing file is not evidence (false-green caught)"
+    );
+    assert!(
+        r["control_coverage"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |g| g["id"] == "c1" && g["reason"].as_str().unwrap().contains("does-not-exist.pdf")
+            ),
+        "coverage gap must name the missing artifact: {:?}",
+        r["control_coverage"]["gaps"]
+    );
+    assert!(
+        r["gap_findings"].as_array().unwrap().iter().any(|g| {
+            g["kind"] == "control_evidence_unresolved"
+                && g["subject_id"] == "c1"
+                && g["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("does-not-exist.pdf")
+                && g["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("attach-evidence c1")
+        }),
+        "a control_evidence_unresolved finding must name the artifact + fix: {:?}",
+        r["gap_findings"]
+    );
+    assert_ne!(r["verdict"], "READY");
+}
+
+/// b1 honor-VERIFIED — a control with an EXISTING file evidence (absolute path)
+/// IS counted as implemented-with-evidence; no unresolved finding (no false-fail).
+#[test]
+fn existing_file_evidence_is_covered_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let f = tmp.path().join("real-evidence.pdf");
+    std::fs::write(&f, b"signed\n").unwrap();
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            f.to_str().unwrap(),
+        ],
+    );
+    let r = data(&d, &["readiness"]);
+    assert_eq!(r["control_coverage"]["implemented_with_evidence"], 1);
+    assert!(
+        !r["control_coverage"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == "c1"),
+        "an existing file resolves — no coverage gap"
+    );
+    assert!(
+        !r["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == "control_evidence_unresolved"),
+        "no unresolved finding for a real artifact"
+    );
+}
+
+/// b1 honor-VERIFIED — a control whose only evidence is a malformed url is NOT
+/// covered (FORMAT gate; NO-NETWORK); the finding names the url.
+#[test]
+fn malformed_url_evidence_is_a_gap_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(&d, &["control", "attach-evidence", "c1", "url", "notaurl"]);
+    let r = data(&d, &["readiness"]);
+    assert_eq!(r["control_coverage"]["implemented_with_evidence"], 0);
+    assert!(
+        r["gap_findings"].as_array().unwrap().iter().any(|g| {
+            g["kind"] == "control_evidence_unresolved"
+                && g["message"].as_str().unwrap().contains("notaurl")
+        }),
+        "a malformed url must surface a naming gap finding: {:?}",
+        r["gap_findings"]
+    );
+}
+
+/// b1 invariant preserved — a note-only evidence still gaps with the existing
+/// `control_honor_evidence` finding (unchanged behavior).
+#[test]
+fn note_only_still_gaps_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(&d, &["control", "attach-evidence", "c1", "note", "did it"]);
+    let r = data(&d, &["readiness"]);
+    assert_eq!(r["control_coverage"]["implemented_with_evidence"], 0);
+    assert!(
+        r["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == "control_honor_evidence" && g["subject_id"] == "c1"),
+        "note-only is still an honor-level gap (b1): {:?}",
+        r["gap_findings"]
     );
 }
 

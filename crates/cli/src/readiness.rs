@@ -8,12 +8,14 @@ use crate::resolve;
 use crate::root::ReadinessArgs;
 use crate::store;
 use crate::view::WithNext;
+use domain::EvidenceVerdict;
 use domain::reference::Derived;
 use infrastructure::output::Output;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
+use std::path::Path;
 
 type Boxed = Result<(), Box<dyn std::error::Error>>;
 
@@ -73,8 +75,18 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
     // ref-kind drift profile per ref-backed control (SC-3: the weakest links are
     // visible). The profile is the domain's pure mapping (SSOT).
     let mut index: BTreeMap<String, Derived> = BTreeMap::new();
+    // honor-VERIFIED (b1, default-on): a `file` evidence counts only if the path
+    // RESOLVES to an existing file (cwd-relative at read time, like `--ref-file`);
+    // a `url` only if well-formed (FORMAT only — v1 is NO-NETWORK). The cli owns
+    // the fs boundary (#8): it injects `Path::is_file` into the pure
+    // `domain::verify_evidence`, which is `false` for a missing path AND a dir.
+    let mut evidence_index: BTreeMap<String, EvidenceVerdict> = BTreeMap::new();
     let mut drift_profiles: Vec<DriftProfileEntry> = Vec::new();
     for c in s.controls.values() {
+        evidence_index.insert(
+            c.id.clone(),
+            domain::verify_evidence(&c.evidence, |p| Path::new(p).is_file()),
+        );
         let own = resolve::project(
             c.r#ref.as_ref(),
             c.resolved.as_ref(),
@@ -136,6 +148,7 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         &s,
         args.process.as_deref(),
         &index,
+        &evidence_index,
         store::source_freshness_secs(),
     );
     let next = if result.verdict == "READY" {
