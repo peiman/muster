@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`file`/`url`); a `note` alone is honor-level and surfaces a
   `control_honor_evidence` gap. Symmetric with how a note *ref* already projects
   to `asserted`. (Breaking for stores that relied on note-only coverage.)
+- **Honesty: a verifying artifact must actually resolve (honor-VERIFIED).** A
+  `file` evidence now counts toward coverage only if the path resolves to an
+  existing file (cwd-relative at read time, like `--ref-file`; a directory or a
+  missing path does not count); a `url` only if it is well-formed
+  (`http(s)://host` — a FORMAT check only, NO-NETWORK, never a reachability
+  probe). A control whose only evidence is a missing file or a malformed url is a
+  coverage gap with a new `control_evidence_unresolved` finding that names the
+  offending artifact and the fix command. Default-on — a named-but-absent
+  artifact never reads green. (Breaking for stores that pointed `file`/`url`
+  evidence at artifacts that are not present at read time.)
 
 ### Added
 

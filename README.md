@@ -93,6 +93,15 @@ Two honesty rules worth knowing up front:
 - **A note proves nothing.** A hand-set control counts toward READY only with a
   *verifying* artifact (`file`/`url`) — a `note` is honor-level and surfaces a
   `control_honor_evidence` gap until you attach real evidence or point a ref.
+- **A named artifact must actually be there (honor-VERIFIED).** A `file` evidence
+  counts only if the path **resolves to an existing file** (resolved relative to
+  the current directory at read time, like `--ref-file`; a directory or a missing
+  path does not count); a `url` counts only if it is **well-formed** (an
+  `http(s)://host` — a FORMAT check only; v1 is NO-NETWORK, never a reachability
+  probe). A control whose only evidence is a missing file or a malformed url is a
+  coverage gap with a `control_evidence_unresolved` finding that names the
+  offending artifact and the fix. This is **default-on** — a named-but-absent
+  artifact is no better than a note, so it never reads green.
 
 ## Examples
 
