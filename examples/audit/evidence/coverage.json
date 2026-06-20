@@ -1,0 +1,5 @@
+{
+  "tool": "tarpaulin",
+  "generated": "2026-06-20",
+  "summary": { "line_percent": 91.4, "covered": 1142, "total": 1250 }
+}

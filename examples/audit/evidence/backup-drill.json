@@ -1,0 +1,4 @@
+{
+  "drill": "quarterly restore test",
+  "last_restore": { "status": "met", "date": "2026-06-01", "rto_minutes": 38 }
+}

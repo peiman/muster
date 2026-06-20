@@ -102,6 +102,12 @@ Two honesty rules worth knowing up front:
   consumer's live conformance report. The best five-minute tour of the whole
   idea — and it shows muster as an *optional* live view over a process that also
   enforces standalone in CI.
+- [`examples/audit/`](examples/audit/) — an ISO 27001 audit scope where every
+  control is wired at the **real evidence** it claims (a coverage metric with a
+  bar, a backup-drill report, a live secrets scan, a hand-set policy control).
+  `muster readiness` becomes the honest pre-audit truth-meter, `control show`
+  resolves live so there's no stale green at audit time, and the bars also
+  enforce in CI without muster.
 
 ## Design
 
