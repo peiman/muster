@@ -254,6 +254,7 @@ The audit log (CKSPEC-OUT-004) writes to `~/.config/<app>/logs/` by default, usi
 - **Coverage:** `just coverage` (85% minimum, CKSPEC-TEST-002)
 - **No mock frameworks.** Use writer injection (pass `&mut dyn Write`) or simple test doubles.
 - **Fuzz target (`fuzz_ping`):** a bolero-based generative test under `crates/domain/tests/fuzz_ping.rs`. This is a pedagogical worked example showing the bolero harness pattern for stable-toolchain generative testing. The production `ping` type is trivial, so this target serves as a template — not a meaningful guard for the shipped type itself.
+- **Trust boundaries get the adversarial-input matrix.** When you add a gate / validator / parser / resolver — anything that decides pass/fail or trusts external data (e.g. `value_to_outcome`, `RateLimitInfo::is_throttled`, the `Ref` resolvers) — its tests MUST cover malformed, missing, wrong-type, and empty/null inputs, **the FALSE-PASS** (does it stay green when the source is red?), and clean failure (its own error path, never a panic). The false-pass is the load-bearing test: a gate that can't go red is worthless. Write these *before* "done" — your own tests default to the happy path; the error path is the real test.
 
 ## Platform Notes
 
