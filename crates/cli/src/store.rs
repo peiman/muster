@@ -206,6 +206,12 @@ pub fn freshness_secs() -> i64 {
     }
 }
 
+/// The one-line warning surfaced (by `readiness` and the `control resolve --all`
+/// doctor surface) when command-cache mode is on — SSOT so both surfaces say the
+/// same thing (#7). Command-ref verdicts are then served from a cache and may be
+/// stale; the honest default re-resolves live.
+pub const CMD_CACHE_WARNING: &str = "⚠ command-cache mode is ON (MUSTER_CMD_CACHE) — command-ref verdicts are served from a cache and may be stale; unset it for live re-resolution.";
+
 /// Whether command refs serve a cached verdict (opt-in, default OFF). When off
 /// (the honest default), command refs re-resolve live on read — no drift window.
 /// Accepts `1`/`true`/`yes`/`on` (case-insensitive) as enabling values.

@@ -402,6 +402,10 @@ struct ResolveEntry {
 struct ResolveAllReport {
     resolved: Vec<ResolveEntry>,
     unresolved_count: usize,
+    /// `true` when `MUSTER_CMD_CACHE` is on — this sweep refreshes/serves cached
+    /// command verdicts that may be stale (b3). Surfaced as a machine flag + a
+    /// human warning so the doctor sweep names the weakened honesty guarantee.
+    cmd_cache_mode: bool,
 }
 
 impl fmt::Display for ResolveAllReport {
@@ -415,6 +419,9 @@ impl fmt::Display for ResolveAllReport {
         for e in &self.resolved {
             let flag = if e.unresolved { "  ⚠ UNRESOLVED" } else { "" };
             writeln!(f, "  {} — {}{}", e.id, e.resolution_state, flag)?;
+        }
+        if self.cmd_cache_mode {
+            writeln!(f, "{}", store::CMD_CACHE_WARNING)?;
         }
         Ok(())
     }
@@ -496,6 +503,7 @@ fn resolve_all(dir: &std::path::Path, output: &Output) -> Boxed {
     let report = ResolveAllReport {
         resolved: entries,
         unresolved_count,
+        cmd_cache_mode: cmd_cache,
     };
     let next = if unresolved_count == 0 {
         "all refs resolve — run: muster readiness".to_string()

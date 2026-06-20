@@ -1353,6 +1353,71 @@ fn b2_source_freshness_bound_flags_stale_source() {
     assert_ne!(r["verdict"], "READY");
 }
 
+/// b3: with `MUSTER_CMD_CACHE` on, command-ref verdicts are served from a cache
+/// and may drift — `readiness` must warn (and carry a machine flag) so the
+/// operator knows the honesty guarantee is weakened. Default (off): no warning.
+#[test]
+fn b3_readiness_warns_in_cmd_cache_mode() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // default: no cache mode → flag false, no warning in the human surface.
+    let r = data(&d, &["readiness"]);
+    assert_eq!(r["cmd_cache_mode"], false);
+    let plain = muster(&d)
+        .args(["readiness", "--output", "text"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("command-cache mode"),
+        "default must not warn"
+    );
+
+    // cache mode on → flag true + a human warning naming the env var.
+    let out = muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["readiness", "--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["cmd_cache_mode"], true);
+    let txt = muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["readiness", "--output", "text"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&txt.stdout);
+    assert!(
+        s.contains("command-cache mode") && s.contains("MUSTER_CMD_CACHE"),
+        "cache mode must warn and name the env var: {s}"
+    );
+}
+
+/// b3: the doctor surface (`control resolve --all`) likewise warns in cache mode.
+#[test]
+fn b3_resolve_all_warns_in_cmd_cache_mode() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let out = muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["control", "resolve", "--all", "--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["data"]["cmd_cache_mode"], true);
+    let txt = muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["control", "resolve", "--all", "--output", "text"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&txt.stdout);
+    assert!(
+        s.contains("command-cache mode") && s.contains("MUSTER_CMD_CACHE"),
+        "doctor surface must warn in cache mode: {s}"
+    );
+}
+
 /// SC-5: `control resolve --all` re-resolves every ref-backed control and flags
 /// any that silently went Unresolved; usage is exactly-one-of id/--all.
 #[test]

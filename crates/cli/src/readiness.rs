@@ -35,6 +35,10 @@ struct ReadinessView<'a> {
     #[serde(flatten)]
     readiness: &'a domain::Readiness,
     drift_profiles: Vec<DriftProfileEntry>,
+    /// `true` when `MUSTER_CMD_CACHE` is on — command-ref verdicts are served from
+    /// a cache and may be stale (b3). A machine flag so an agent surface can react;
+    /// the human surface also prints a warning line.
+    cmd_cache_mode: bool,
 }
 
 impl fmt::Display for ReadinessView<'_> {
@@ -45,6 +49,9 @@ impl fmt::Display for ReadinessView<'_> {
             for e in &self.drift_profiles {
                 writeln!(f, "    {} — {}", e.id, e.profile)?;
             }
+        }
+        if self.cmd_cache_mode {
+            writeln!(f, "  {}", store::CMD_CACHE_WARNING)?;
         }
         Ok(())
     }
@@ -139,6 +146,7 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
     let readiness_view = ReadinessView {
         readiness: &result,
         drift_profiles,
+        cmd_cache_mode: cmd_cache,
     };
     let view = WithNext::new(&readiness_view, next);
     output.success("readiness", &view, &mut io::stdout())?;
