@@ -80,7 +80,7 @@ pub struct GapFinding {
 /// (no resolution index); the cli calls `readiness_with` to pass derived
 /// projections.
 pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
-    readiness_with(store, scope, &BTreeMap::new())
+    readiness_with(store, scope, &BTreeMap::new(), None)
 }
 
 /// The v1 truth-meter. `index` maps a control id to its honest `Derived`
@@ -89,23 +89,38 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
 /// `Asserted`) follow the v0 hand-set path; ref-backed controls count as covered
 /// only when freshly `Derived` + `Pass`, and `Unresolved`/`Stale`/derived-`Fail`
 /// become honest gap findings (never silent green, #1/#3).
+///
+/// `source_freshness_secs` is the opt-in source-age bound (b2): when `Some(b)`, a
+/// live, passing `file_anchor` whose pointed-at artifact is older than `b`
+/// seconds is held back as a coverage gap + a `ref_source_stale` finding (a
+/// confident `met` must not hide a file nobody regenerated). `None` ⇒ no
+/// source-age gating (today's behavior). The cli reads it from
+/// `MUSTER_SOURCE_FRESHNESS_SECS`.
 pub fn readiness_with(
     store: &Store,
     scope: Option<&str>,
     index: &BTreeMap<String, Derived>,
+    source_freshness_secs: Option<i64>,
 ) -> Readiness {
     let in_scope: BTreeSet<String> = match scope {
         Some(id) => store.reachable(id),
         None => store.processes.keys().cloned().collect(),
     };
 
-    let control_coverage = control_coverage(store, scope, &in_scope, index);
+    let control_coverage = control_coverage(store, scope, &in_scope, index, source_freshness_secs);
     let controls = controls_split(store, scope, &in_scope, index);
     let (proven, asserted) = proven_vs_asserted(store, &in_scope);
     let refuting_signals = refuting_signals(store, &in_scope);
     let enforcement = enforcement(store, &in_scope);
     let cycles = scoped_cycles(store, scope, &in_scope);
-    let gap_findings = gap_findings(store, scope, &in_scope, &cycles, index);
+    let gap_findings = gap_findings(
+        store,
+        scope,
+        &in_scope,
+        &cycles,
+        index,
+        source_freshness_secs,
+    );
 
     // Full coverage via exact integer equality (no float comparison): every
     // applicable control is implemented-with-evidence.
@@ -210,6 +225,7 @@ fn control_coverage(
     scope: Option<&str>,
     in_scope: &BTreeSet<String>,
     index: &BTreeMap<String, Derived>,
+    source_freshness_secs: Option<i64>,
 ) -> ControlCoverage {
     let applicable_ids = applicable_controls(store, scope, in_scope);
     let applicable = applicable_ids.len();
@@ -225,12 +241,22 @@ fn control_coverage(
         // the v0 rule (status Implemented + attached evidence).
         if is_derived(index, id) {
             let d = index.get(id).expect("is_derived ⇒ present");
-            if d.is_green_eligible() {
+            // Stale-by-source: a live, passing file_anchor whose pointed-at
+            // artifact is older than the (opt-in) source-freshness bound is NOT
+            // fresh coverage — the verdict is live but derives from an
+            // un-regenerated file (#1, b2). `None` bound ⇒ this never bites.
+            let stale_source = d.is_green_eligible() && d.source_is_stale(source_freshness_secs);
+            if d.is_green_eligible() && !stale_source {
                 implemented_with_evidence += 1;
             } else {
+                let reason = if stale_source {
+                    source_stale_reason(d)
+                } else {
+                    derived_gap_reason(d)
+                };
                 gaps.push(CoverageGap {
                     id: id.clone(),
-                    reason: derived_gap_reason(d),
+                    reason,
                 });
             }
             continue;
@@ -395,6 +421,16 @@ fn scoped_cycles(
     }
 }
 
+/// Human-readable reason a live, passing file_anchor is held back as a coverage
+/// gap because its SOURCE artifact is stale-by-policy (b2). Distinct from the
+/// cache `Stale` reason — the verdict resolved live; the artifact is old.
+fn source_stale_reason(d: &Derived) -> String {
+    format!(
+        "resolved live but the source artifact is {}s old (exceeds the source-freshness bound) — regenerate it",
+        d.source_age_secs().unwrap_or(0)
+    )
+}
+
 /// Human-readable reason a ref-backed control is not covered.
 fn derived_gap_reason(d: &Derived) -> String {
     match d {
@@ -415,6 +451,7 @@ fn gap_findings(
     in_scope: &BTreeSet<String>,
     cycles: &[Vec<String>],
     index: &BTreeMap<String, Derived>,
+    source_freshness_secs: Option<i64>,
 ) -> Vec<GapFinding> {
     let mut out = Vec::new();
     // Reference gaps (v1): a ref that can't be followed (unresolved), a cache
@@ -454,6 +491,25 @@ fn gap_findings(
                 ),
             }),
             _ => {}
+        }
+        // Stale-by-source (b2): a live, passing file_anchor whose source artifact
+        // is older than the opt-in bound — the verdict is live but the file is
+        // un-regenerated. Independent of the match above (only fires on an
+        // otherwise-green projection). `None` bound ⇒ never fires.
+        if let Some(d) = index
+            .get(&c.id)
+            .filter(|d| d.is_green_eligible() && d.source_is_stale(source_freshness_secs))
+        {
+            out.push(GapFinding {
+                kind: "ref_source_stale".into(),
+                subject_id: c.id.clone(),
+                message: format!(
+                    "control '{}' resolved live but its source artifact is {}s old (exceeds the source-freshness bound) — regenerate the source, then: muster control resolve {}",
+                    c.id,
+                    d.source_age_secs().unwrap_or(0),
+                    c.id
+                ),
+            });
         }
     }
     // Active processes: missing risks / metrics / controls (guide, don't gate).
@@ -717,6 +773,48 @@ mod tests {
                 .any(|g| g.kind == "control_honor_evidence"),
             "a file artifact is verifying — no honor finding"
         );
+    }
+
+    #[test]
+    fn source_stale_file_anchor_is_a_gap_only_when_bound_set() {
+        use crate::reference::{Derived, Outcome};
+        let mut s = base();
+        s.add_control("c1", "C1", None, true).unwrap();
+        // a live-resolved, passing file_anchor whose SOURCE artifact is 1000s old.
+        let stale_src = Derived::Derived {
+            value: "met".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: Some(1000),
+        };
+        let mut index = BTreeMap::new();
+        index.insert("c1".to_string(), stale_src);
+
+        // opt-in: no source-freshness bound ⇒ counts as covered (today's behavior).
+        let r0 = readiness_with(&s, None, &index, None);
+        assert_eq!(r0.control_coverage.implemented_with_evidence, 1);
+        assert!(
+            !r0.gap_findings.iter().any(|g| g.kind == "ref_source_stale"),
+            "no bound ⇒ no source-stale gating"
+        );
+
+        // bound 600 < 1000 age ⇒ stale-by-source: not fresh coverage, a finding.
+        let r = readiness_with(&s, None, &index, Some(600));
+        assert_eq!(
+            r.control_coverage.implemented_with_evidence, 0,
+            "a stale source is not fresh coverage"
+        );
+        assert!(r.control_coverage.gaps.iter().any(|g| g.id == "c1"));
+        assert!(
+            r.gap_findings
+                .iter()
+                .any(|g| g.kind == "ref_source_stale" && g.subject_id == "c1"),
+            "a source-stale finding must name the control"
+        );
+        assert_ne!(r.verdict, "READY");
     }
 
     #[test]

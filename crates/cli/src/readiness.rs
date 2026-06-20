@@ -125,7 +125,12 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         }
     }
 
-    let result = domain::readiness_with(&s, args.process.as_deref(), &index);
+    let result = domain::readiness_with(
+        &s,
+        args.process.as_deref(),
+        &index,
+        store::source_freshness_secs(),
+    );
     let next = if result.verdict == "READY" {
         "you are certification-ready — keep evidence fresh".to_string()
     } else {

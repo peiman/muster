@@ -1287,6 +1287,72 @@ fn sc4_source_artifact_age_surfaced() {
     assert!(s.contains("src_age="), "human must show source age: {s}");
 }
 
+/// b2: an opt-in `MUSTER_SOURCE_FRESHNESS_SECS` bound flags a live-passing
+/// file_anchor whose SOURCE artifact is stale (mtime older than the bound) — the
+/// verdict resolved live but derives from an un-regenerated file, so it is NOT
+/// fresh coverage. Default (no bound) keeps today's behavior exactly.
+#[test]
+fn b2_source_freshness_bound_flags_stale_source() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // A passing file_anchor whose source mtime is back-dated to 2020.
+    let src = write_src(&tmp, "cov.toml", "[r.r1]\nstatus = \"met\"\n");
+    let _ = std::process::Command::new("touch")
+        .args(["-t", "202001010000", &src])
+        .status();
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c-cov",
+            "--title",
+            "Coverage",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "r.r1.status",
+        ],
+    );
+
+    // No bound (default): the live `met` counts as covered; no source-stale gap.
+    let r0 = data(&d, &["readiness"]);
+    assert_eq!(r0["control_coverage"]["implemented_with_evidence"], 1);
+    assert!(
+        !r0["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == "ref_source_stale"),
+        "no bound ⇒ no source-stale gating"
+    );
+
+    // With a 1-hour bound, the 2020 artifact is stale-by-source: not fresh
+    // coverage, a ref_source_stale finding, verdict not READY.
+    let out = muster(&d)
+        .env("MUSTER_SOURCE_FRESHNESS_SECS", "3600")
+        .args(["readiness", "--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let r = &v["data"];
+    assert_eq!(
+        r["control_coverage"]["implemented_with_evidence"], 0,
+        "a stale source is not fresh coverage"
+    );
+    assert!(
+        r["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["kind"] == "ref_source_stale" && g["subject_id"] == "c-cov"),
+        "a stale source must surface a ref_source_stale finding: {}",
+        r["gap_findings"]
+    );
+    assert_ne!(r["verdict"], "READY");
+}
+
 /// SC-5: `control resolve --all` re-resolves every ref-backed control and flags
 /// any that silently went Unresolved; usage is exactly-one-of id/--all.
 #[test]

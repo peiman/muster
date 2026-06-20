@@ -254,6 +254,32 @@ impl Derived {
         }
     }
 
+    /// The pointed-at source artifact's mtime age (seconds), for a `file_anchor`
+    /// projection. `None` for command/note refs (no single source file) and for
+    /// non-`Derived` states. The raw axis the source-freshness policy gates on.
+    pub fn source_age_secs(&self) -> Option<i64> {
+        match self {
+            Derived::Derived {
+                source_age_secs, ..
+            } => *source_age_secs,
+            _ => None,
+        }
+    }
+
+    /// `true` when this projection's source artifact is older than `bound`
+    /// seconds. The source-freshness policy is OPT-IN — `None` ⇒ never
+    /// stale-by-source (preserves the default "file_anchor re-resolves live,
+    /// never stale" behavior). When a bound is set, a `met` resolved live from an
+    /// artifact nobody regenerated past the bound is honestly NOT fresh coverage
+    /// (#1) — a distinct axis from the cache `Stale` (which is about the served
+    /// *verdict*, not the *source*). Strictly-greater, mirroring [`is_stale`].
+    pub fn source_is_stale(&self, bound: Option<i64>) -> bool {
+        match (self.source_age_secs(), bound) {
+            (Some(age), Some(b)) => age > b,
+            _ => false,
+        }
+    }
+
     /// Green-eligible only when freshly derived **live** with a non-failing
     /// outcome. A cache-served verdict (`served_from_cache == true`) is never
     /// authority (#7): even within its freshness bound it can freeze a `Pass`
@@ -455,6 +481,45 @@ mod tests {
             !cached_pass.is_green_eligible(),
             "a cache-served Pass must not be green-eligible"
         );
+    }
+
+    #[test]
+    fn source_is_stale_is_opt_in_and_only_for_file_anchor_age() {
+        // `source_age_secs` is the mtime age of a file_anchor's pointed-at
+        // artifact. The source-freshness policy is OPT-IN: `None` ⇒ never
+        // stale-by-source (today's behavior). With a bound, an artifact older
+        // than it is stale-by-source even though the verdict resolved live — a
+        // confident `met` must not hide that it derives from a file nobody
+        // regenerated (#1).
+        let fresh_src = Derived::Derived {
+            value: "met".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: Some(10),
+        };
+        // opt-in: no bound ⇒ never stale-by-source.
+        assert!(!fresh_src.source_is_stale(None));
+        // within the bound ⇒ fresh; beyond ⇒ stale (strictly greater).
+        assert!(!fresh_src.source_is_stale(Some(10)));
+        assert!(fresh_src.source_is_stale(Some(9)));
+        assert_eq!(fresh_src.source_age_secs(), Some(10));
+        // a projection without a source age (command/note/stale) is never
+        // stale-by-source — the axis doesn't apply.
+        let no_src = Derived::Derived {
+            value: "pass".into(),
+            outcome: Outcome::Pass,
+            resolved_ts: "t".into(),
+            source_excerpt: None,
+            resolved_age_secs: 0,
+            served_from_cache: false,
+            source_age_secs: None,
+        };
+        assert!(!no_src.source_is_stale(Some(0)));
+        assert_eq!(no_src.source_age_secs(), None);
+        assert!(!Derived::Asserted.source_is_stale(Some(0)));
     }
 
     #[test]

@@ -21,6 +21,11 @@ const DEFAULT_FRESHNESS_SECS: i64 = 86_400;
 /// expensive commands, accepting that the verdict goes `Stale` past the freshness
 /// bound and the resolved age is always surfaced.
 const ENV_CMD_CACHE: &str = "MUSTER_CMD_CACHE";
+/// Opt-in source-freshness bound (seconds). When set, a `file_anchor` whose
+/// pointed-at artifact's mtime age exceeds it is flagged stale-by-source in
+/// `readiness` (a live `met` from an un-regenerated file is not fresh coverage).
+/// Default UNSET ⇒ `None` ⇒ no source-age gating (today's behavior, b2).
+const ENV_SOURCE_FRESHNESS: &str = "MUSTER_SOURCE_FRESHNESS_SECS";
 const MANIFEST: &str = "manifest.json";
 const SCHEMA_VERSION: u32 = 1;
 
@@ -211,6 +216,18 @@ pub fn cmd_cache_enabled() -> bool {
             "1" | "true" | "yes" | "on"
         ),
         Err(_) => false,
+    }
+}
+
+/// The opt-in source-freshness bound (seconds) from `MUSTER_SOURCE_FRESHNESS_SECS`,
+/// or `None` when unset/blank/unparseable (no source-age gating — the default).
+/// A non-positive value also disables gating (an explicit "don't gate"). Passed
+/// into `readiness` so a `file_anchor` reading an un-regenerated artifact past
+/// the bound is honestly flagged stale-by-source (b2).
+pub fn source_freshness_secs() -> Option<i64> {
+    match std::env::var(ENV_SOURCE_FRESHNESS) {
+        Ok(v) => v.trim().parse::<i64>().ok().filter(|n| *n > 0),
+        Err(_) => None,
     }
 }
 
