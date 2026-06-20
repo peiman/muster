@@ -11,9 +11,9 @@ pub mod store;
 
 pub use model::{
     Check, CheckResult, Control, ControlStatus, DomainError, Enforcement, Evidence, EvidenceKind,
-    Implementation, Incident, IncidentStatus, LogEntry, Nonconformity, NonconformitySource,
-    NonconformityStatus, Process, ProcessStatus, Revision, Severity, Step, has_verifying_evidence,
-    validate_slug,
+    EvidenceVerdict, Implementation, Incident, IncidentStatus, LogEntry, Nonconformity,
+    NonconformitySource, NonconformityStatus, Process, ProcessStatus, Revision, Severity, Step,
+    has_verifying_evidence, is_well_formed_url, validate_slug, verify_evidence,
 };
 pub use readiness::{ControlsSplit, Readiness, readiness, readiness_with};
 pub use reference::{

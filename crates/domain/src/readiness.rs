@@ -8,7 +8,9 @@
 //! never hangs), and emits a top-line verdict that is **never green while a gap
 //! exists** (#3 honest signals).
 
-use crate::model::{ControlStatus, IncidentStatus, NonconformityStatus, ProcessStatus};
+use crate::model::{
+    ControlStatus, Evidence, EvidenceVerdict, IncidentStatus, NonconformityStatus, ProcessStatus,
+};
 use crate::reference::Derived;
 use crate::store::Store;
 use serde::Serialize;
@@ -77,10 +79,12 @@ pub struct GapFinding {
 
 /// Compute readiness over the whole store, or (with `scope`) over one process
 /// and its reachable sub-graph. v0 entry point — treats every control as asserted
-/// (no resolution index); the cli calls `readiness_with` to pass derived
-/// projections.
+/// (no resolution index) and every evidence as **kind-only** (no fs: a `file`/
+/// `url` counts merely by KIND); the cli calls `readiness_with` to pass derived
+/// projections AND resolved evidence verdicts (a `file` must exist, a `url` must
+/// be well-formed).
 pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
-    readiness_with(store, scope, &BTreeMap::new(), None)
+    readiness_with(store, scope, &BTreeMap::new(), &BTreeMap::new(), None)
 }
 
 /// The v1 truth-meter. `index` maps a control id to its honest `Derived`
@@ -89,6 +93,15 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
 /// `Asserted`) follow the v0 hand-set path; ref-backed controls count as covered
 /// only when freshly `Derived` + `Pass`, and `Unresolved`/`Stale`/derived-`Fail`
 /// become honest gap findings (never silent green, #1/#3).
+///
+/// `evidence_index` maps a control id to its honest `EvidenceVerdict` (built by
+/// the cli, which owns fs — a `file` evidence resolves only if it exists, a `url`
+/// only if well-formed; FORMAT only, NO-NETWORK). For an **asserted**
+/// (non-derived) `Implemented` control it decides coverage: `Verified` counts;
+/// `Unresolved`/`NoteOnly`/`Empty` become honest gaps + findings that name the
+/// offending artifact (the b1 honor-VERIFIED upgrade). A control absent from this
+/// index falls back to the kind-only `has_verifying_evidence` path (the v0 /
+/// domain-unit-test behavior), exactly mirroring the `Derived` index fallback.
 ///
 /// `source_freshness_secs` is the opt-in source-age bound (b2): when `Some(b)`, a
 /// live, passing `file_anchor` whose pointed-at artifact is older than `b`
@@ -100,6 +113,7 @@ pub fn readiness_with(
     store: &Store,
     scope: Option<&str>,
     index: &BTreeMap<String, Derived>,
+    evidence_index: &BTreeMap<String, EvidenceVerdict>,
     source_freshness_secs: Option<i64>,
 ) -> Readiness {
     let in_scope: BTreeSet<String> = match scope {
@@ -107,7 +121,14 @@ pub fn readiness_with(
         None => store.processes.keys().cloned().collect(),
     };
 
-    let control_coverage = control_coverage(store, scope, &in_scope, index, source_freshness_secs);
+    let control_coverage = control_coverage(
+        store,
+        scope,
+        &in_scope,
+        index,
+        evidence_index,
+        source_freshness_secs,
+    );
     let controls = controls_split(store, scope, &in_scope, index);
     let (proven, asserted) = proven_vs_asserted(store, &in_scope);
     let refuting_signals = refuting_signals(store, &in_scope);
@@ -119,6 +140,7 @@ pub fn readiness_with(
         &in_scope,
         &cycles,
         index,
+        evidence_index,
         source_freshness_secs,
     );
 
@@ -225,6 +247,7 @@ fn control_coverage(
     scope: Option<&str>,
     in_scope: &BTreeSet<String>,
     index: &BTreeMap<String, Derived>,
+    evidence_index: &BTreeMap<String, EvidenceVerdict>,
     source_freshness_secs: Option<i64>,
 ) -> ControlCoverage {
     let applicable_ids = applicable_controls(store, scope, in_scope);
@@ -262,22 +285,24 @@ fn control_coverage(
             }
             continue;
         }
-        // STRICT honor path (v3.1): a note-only assertion is honor-level and does
-        // NOT prove coverage; at least one *verifying* artifact (file/url) is
-        // required (#1, symmetric with a note ref → Asserted, never green).
-        let has_verifying = crate::model::has_verifying_evidence(&c.evidence);
-        if c.status == ControlStatus::Implemented && has_verifying {
+        // STRICT honor path: a note-only assertion is honor-level and does NOT
+        // prove coverage; at least one *verifying* artifact (file/url) is required
+        // (#1, symmetric with a note ref → Asserted, never green). honor-VERIFIED
+        // (b1): when the cli supplied an `EvidenceVerdict`, a verifying artifact
+        // counts ONLY if it RESOLVES (a `file` exists / a `url` is well-formed) —
+        // a named-but-missing artifact is no better than a note. Absent from the
+        // index ⇒ fall back to kind-only (the v0 / domain-unit-test path).
+        let covered = match evidence_index.get(id) {
+            Some(v) => c.status == ControlStatus::Implemented && *v == EvidenceVerdict::Verified,
+            None => {
+                c.status == ControlStatus::Implemented
+                    && crate::model::has_verifying_evidence(&c.evidence)
+            }
+        };
+        if covered {
             implemented_with_evidence += 1;
         } else {
-            let reason = match (c.status, c.evidence.is_empty(), has_verifying) {
-                (ControlStatus::Implemented, true, _) => {
-                    "implemented but has no evidence".to_string()
-                }
-                (ControlStatus::Implemented, false, false) => {
-                    "implemented but evidence is honor-level (note only) — attach a file/url artifact or point a ref".to_string()
-                }
-                (status, _, _) => format!("status is {status}, not implemented-with-evidence"),
-            };
+            let reason = coverage_gap_reason(c.status, &c.evidence, evidence_index.get(id));
             gaps.push(CoverageGap {
                 id: id.clone(),
                 reason,
@@ -432,6 +457,58 @@ fn source_stale_reason(d: &Derived) -> String {
     )
 }
 
+/// Human-readable reason an asserted (non-derived) `Implemented` control is not
+/// implemented-with-evidence. Names the offending artifact when an
+/// `EvidenceVerdict::Unresolved` is available (honor-VERIFIED); falls back to the
+/// kind-only wording when no verdict was supplied (the v0 path).
+fn coverage_gap_reason(
+    status: ControlStatus,
+    evidence: &[Evidence],
+    verdict: Option<&EvidenceVerdict>,
+) -> String {
+    if status != ControlStatus::Implemented {
+        return format!("status is {status}, not implemented-with-evidence");
+    }
+    match verdict {
+        Some(EvidenceVerdict::Unresolved {
+            kind,
+            value,
+            reason,
+        }) => format!("implemented but its {kind} evidence '{value}' does not resolve — {reason}"),
+        Some(EvidenceVerdict::Empty) => "implemented but has no evidence".to_string(),
+        Some(EvidenceVerdict::NoteOnly) => {
+            "implemented but evidence is honor-level (note only) — attach a file/url artifact or point a ref".to_string()
+        }
+        // Verified is the covered path (handled by the caller); name it honestly
+        // if ever reached.
+        Some(EvidenceVerdict::Verified) => "implemented but evidence did not verify".to_string(),
+        None if evidence.is_empty() => "implemented but has no evidence".to_string(),
+        None => "implemented but evidence is honor-level (note only) — attach a file/url artifact or point a ref".to_string(),
+    }
+}
+
+/// The `control_no_evidence` gap finding (implemented but nothing attached).
+fn control_no_evidence_finding(id: &str) -> GapFinding {
+    GapFinding {
+        kind: "control_no_evidence".into(),
+        subject_id: id.to_string(),
+        message: format!(
+            "control '{id}' is implemented but has no evidence — attach: muster control attach-evidence {id} <kind> <value>"
+        ),
+    }
+}
+
+/// The `control_honor_evidence` gap finding (only honor-level note(s) attached).
+fn control_honor_evidence_finding(id: &str) -> GapFinding {
+    GapFinding {
+        kind: "control_honor_evidence".into(),
+        subject_id: id.to_string(),
+        message: format!(
+            "control '{id}' is implemented but its only evidence is a note (honor-level) — attach a file/url artifact: muster control attach-evidence {id} file <path>"
+        ),
+    }
+}
+
 /// Human-readable reason a ref-backed control is not covered.
 fn derived_gap_reason(d: &Derived) -> String {
     match d {
@@ -452,6 +529,7 @@ fn gap_findings(
     in_scope: &BTreeSet<String>,
     cycles: &[Vec<String>],
     index: &BTreeMap<String, Derived>,
+    evidence_index: &BTreeMap<String, EvidenceVerdict>,
     source_freshness_secs: Option<i64>,
 ) -> Vec<GapFinding> {
     let mut out = Vec::new();
@@ -544,28 +622,43 @@ fn gap_findings(
             });
         }
     }
-    // Controls implemented but with no — or only honor-level — evidence (in
-    // scope). An empty-evidence control is `control_no_evidence`; a note-only
-    // control is `control_honor_evidence` (v3.1 strict honor path: a note proves
-    // nothing — name the verifying-artifact fix).
+    // Controls implemented but with no — only honor-level — or non-resolving
+    // evidence (in scope). The three are mutually exclusive per control:
+    //   - empty evidence            ⇒ `control_no_evidence`
+    //   - note-only (honor-level)   ⇒ `control_honor_evidence`
+    //   - named file/url that does NOT resolve (honor-VERIFIED, b1)
+    //                               ⇒ `control_evidence_unresolved` (names the artifact)
+    // When the cli supplied an `EvidenceVerdict` it decides; absent ⇒ kind-only
+    // fallback (a `file`/`url` proves by KIND — the v0 / domain-unit-test path).
     let scoped_control =
         |id: &str| -> bool { scope.is_none() || applicable_in_scope(store, scope, in_scope, id) };
     for c in store.controls.values() {
         if c.status != ControlStatus::Implemented || !scoped_control(&c.id) {
             continue;
         }
-        if c.evidence.is_empty() {
-            out.push(GapFinding {
-                kind: "control_no_evidence".into(),
+        match evidence_index.get(&c.id) {
+            Some(EvidenceVerdict::Verified) => {}
+            Some(EvidenceVerdict::Empty) => out.push(control_no_evidence_finding(&c.id)),
+            Some(EvidenceVerdict::NoteOnly) => out.push(control_honor_evidence_finding(&c.id)),
+            Some(EvidenceVerdict::Unresolved {
+                kind,
+                value,
+                reason,
+            }) => out.push(GapFinding {
+                kind: "control_evidence_unresolved".into(),
                 subject_id: c.id.clone(),
-                message: format!("control '{}' is implemented but has no evidence — attach: muster control attach-evidence {} <kind> <value>", c.id, c.id),
-            });
-        } else if !crate::model::has_verifying_evidence(&c.evidence) {
-            out.push(GapFinding {
-                kind: "control_honor_evidence".into(),
-                subject_id: c.id.clone(),
-                message: format!("control '{}' is implemented but its only evidence is a note (honor-level) — attach a file/url artifact: muster control attach-evidence {} file <path>", c.id, c.id),
-            });
+                message: format!(
+                    "control '{}' is implemented but its {kind} evidence '{value}' does not resolve — {reason}; attach a real artifact: muster control attach-evidence {} {kind} <value>",
+                    c.id, c.id
+                ),
+            }),
+            None => {
+                if c.evidence.is_empty() {
+                    out.push(control_no_evidence_finding(&c.id));
+                } else if !crate::model::has_verifying_evidence(&c.evidence) {
+                    out.push(control_honor_evidence_finding(&c.id));
+                }
+            }
         }
     }
     // Open nonconformities with no corrective action.
@@ -776,6 +869,130 @@ mod tests {
         );
     }
 
+    /// Build an evidence index mapping one control to a verdict.
+    fn evidence_index(id: &str, v: EvidenceVerdict) -> BTreeMap<String, EvidenceVerdict> {
+        let mut m = BTreeMap::new();
+        m.insert(id.to_string(), v);
+        m
+    }
+
+    fn implemented_control_with_file(s: &mut Store, id: &str, path: &str) {
+        s.add_control(id, "C", None, true).unwrap();
+        s.set_control_status(id, ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            id,
+            Evidence {
+                kind: EvidenceKind::File,
+                value: path.into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn missing_file_evidence_is_not_covered_and_names_the_gap() {
+        // honor-VERIFIED (b1): a control whose ONLY evidence is a `file` that does
+        // NOT resolve is the canonical false-green — it must NOT count, must be a
+        // coverage gap, and must surface a `control_evidence_unresolved` finding
+        // NAMING the artifact + the fix.
+        let mut s = base();
+        implemented_control_with_file(&mut s, "c1", "does-not-exist.pdf");
+        let idx = evidence_index(
+            "c1",
+            EvidenceVerdict::Unresolved {
+                kind: EvidenceKind::File,
+                value: "does-not-exist.pdf".into(),
+                reason: "missing or not a regular file".into(),
+            },
+        );
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        assert_eq!(
+            r.control_coverage.implemented_with_evidence, 0,
+            "a missing file is not evidence (FALSE-PASS guard)"
+        );
+        let gap = r
+            .control_coverage
+            .gaps
+            .iter()
+            .find(|g| g.id == "c1")
+            .expect("c1 must be a coverage gap");
+        assert!(
+            gap.reason.contains("does-not-exist.pdf"),
+            "coverage gap must name the artifact: {}",
+            gap.reason
+        );
+        let finding = r
+            .gap_findings
+            .iter()
+            .find(|g| g.kind == "control_evidence_unresolved" && g.subject_id == "c1")
+            .expect("a control_evidence_unresolved finding must name the fix");
+        assert!(finding.message.contains("does-not-exist.pdf"));
+        assert!(finding.message.contains("attach-evidence c1"));
+        assert_ne!(r.verdict, "READY");
+    }
+
+    #[test]
+    fn malformed_url_evidence_is_not_covered_and_names_the_gap() {
+        let mut s = base();
+        s.add_control("c1", "C", None, true).unwrap();
+        s.set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        s.attach_control_evidence(
+            "c1",
+            Evidence {
+                kind: EvidenceKind::Url,
+                value: "notaurl".into(),
+            },
+        )
+        .unwrap();
+        let idx = evidence_index(
+            "c1",
+            EvidenceVerdict::Unresolved {
+                kind: EvidenceKind::Url,
+                value: "notaurl".into(),
+                reason: "malformed url".into(),
+            },
+        );
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        assert_eq!(r.control_coverage.implemented_with_evidence, 0);
+        assert!(
+            r.gap_findings
+                .iter()
+                .any(|g| g.kind == "control_evidence_unresolved" && g.message.contains("notaurl"))
+        );
+    }
+
+    #[test]
+    fn verified_evidence_is_covered_no_unresolved_finding() {
+        let mut s = base();
+        implemented_control_with_file(&mut s, "c1", "real.pdf");
+        let idx = evidence_index("c1", EvidenceVerdict::Verified);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        assert_eq!(r.control_coverage.implemented_with_evidence, 1);
+        assert!(
+            !r.gap_findings
+                .iter()
+                .any(|g| g.kind == "control_evidence_unresolved")
+        );
+        assert!(!r.control_coverage.gaps.iter().any(|g| g.id == "c1"));
+    }
+
+    #[test]
+    fn absent_from_evidence_index_falls_back_to_kind_only() {
+        // The v0 / domain-unit-test regression guard: with no evidence index entry
+        // a `file` evidence proves by KIND (no fs in domain), exactly as before.
+        let mut s = base();
+        implemented_control_with_file(&mut s, "c1", "report.json");
+        let r = readiness_with(&s, None, &BTreeMap::new(), &BTreeMap::new(), None);
+        assert_eq!(r.control_coverage.implemented_with_evidence, 1);
+        assert!(
+            !r.gap_findings
+                .iter()
+                .any(|g| g.kind == "control_evidence_unresolved")
+        );
+    }
+
     #[test]
     fn source_stale_file_anchor_is_a_gap_only_when_bound_set() {
         use crate::reference::{Derived, Outcome};
@@ -795,7 +1012,7 @@ mod tests {
         index.insert("c1".to_string(), stale_src);
 
         // opt-in: no source-freshness bound ⇒ counts as covered (today's behavior).
-        let r0 = readiness_with(&s, None, &index, None);
+        let r0 = readiness_with(&s, None, &index, &BTreeMap::new(), None);
         assert_eq!(r0.control_coverage.implemented_with_evidence, 1);
         assert!(
             !r0.gap_findings.iter().any(|g| g.kind == "ref_source_stale"),
@@ -803,7 +1020,7 @@ mod tests {
         );
 
         // bound 600 < 1000 age ⇒ stale-by-source: not fresh coverage, a finding.
-        let r = readiness_with(&s, None, &index, Some(600));
+        let r = readiness_with(&s, None, &index, &BTreeMap::new(), Some(600));
         assert_eq!(
             r.control_coverage.implemented_with_evidence, 0,
             "a stale source is not fresh coverage"
@@ -839,7 +1056,7 @@ mod tests {
         let mut index = BTreeMap::new();
         index.insert("c1".to_string(), failing_and_old);
 
-        let r = readiness_with(&s, None, &index, Some(600));
+        let r = readiness_with(&s, None, &index, &BTreeMap::new(), Some(600));
         assert!(
             r.gap_findings.iter().any(|g| g.kind == "ref_failing"),
             "a failing source is a ref_failing gap"

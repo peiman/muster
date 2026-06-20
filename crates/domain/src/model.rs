@@ -261,6 +261,97 @@ pub fn has_verifying_evidence(evidence: &[Evidence]) -> bool {
     evidence.iter().any(|e| e.kind.is_verifying())
 }
 
+/// FORMAT-only URL validation (v1 is NO-NETWORK — this is **never** a
+/// reachability / HTTP check). Well-formed ⇔ a case-insensitive `http`/`https`
+/// scheme, then `://`, then a non-empty host. Pure std string ops (no `url`
+/// crate, no I/O — stays domain-pure, #8). Rejects `""`, whitespace, `notaurl`
+/// (no scheme), `ftp://h` (wrong scheme), `http://` (empty host), `://x` (empty
+/// scheme).
+pub fn is_well_formed_url(value: &str) -> bool {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return false;
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    // Host is everything up to the first '/', '?' or '#'; must be non-empty.
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+}
+
+/// The honest verifying verdict for an evidence list, given a file-existence
+/// ORACLE supplied by the caller (the cli passes `Path::is_file`; the domain
+/// invokes the closure but does no fs itself, keeping #8). URL format is checked
+/// purely. Returns `Verified` on the FIRST evidence whose artifact resolves; else
+/// `Empty` (no evidence), `NoteOnly` (only honor-level notes), or `Unresolved`
+/// naming the FIRST verifying-kind (file/url) item that did not resolve so the
+/// readiness layer can name the offender + the fix (#3 honest signals).
+pub fn verify_evidence(
+    evidence: &[Evidence],
+    file_exists: impl Fn(&str) -> bool,
+) -> EvidenceVerdict {
+    if evidence.is_empty() {
+        return EvidenceVerdict::Empty;
+    }
+    let mut first_unresolved: Option<EvidenceVerdict> = None;
+    let mut saw_verifying_kind = false;
+    for e in evidence {
+        let resolves = match e.kind {
+            EvidenceKind::File => {
+                saw_verifying_kind = true;
+                file_exists(&e.value)
+            }
+            EvidenceKind::Url => {
+                saw_verifying_kind = true;
+                is_well_formed_url(&e.value)
+            }
+            EvidenceKind::Note => false,
+        };
+        if resolves {
+            return EvidenceVerdict::Verified;
+        }
+        if e.kind.is_verifying() && first_unresolved.is_none() {
+            let reason = match e.kind {
+                EvidenceKind::File => "missing or not a regular file (paths resolve relative to the current directory)".to_string(),
+                EvidenceKind::Url => "malformed url — needs an http(s):// scheme and a host".to_string(),
+                EvidenceKind::Note => unreachable!("note is not a verifying kind"),
+            };
+            first_unresolved = Some(EvidenceVerdict::Unresolved {
+                kind: e.kind,
+                value: e.value.clone(),
+                reason,
+            });
+        }
+    }
+    match first_unresolved {
+        Some(v) => v,
+        None if saw_verifying_kind => unreachable!("a verifying kind always sets first_unresolved"),
+        None => EvidenceVerdict::NoteOnly,
+    }
+}
+
+/// The honest verifying verdict for a control's / process's evidence list (the
+/// honor-VERIFIED upgrade of `has_verifying_evidence`). Built by the cli (which
+/// injects file-existence) and threaded into `readiness_with`; controls absent
+/// from that index fall back to the kind-only `has_verifying_evidence`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub enum EvidenceVerdict {
+    /// ≥1 verifying artifact resolves (an existing file or a well-formed url).
+    Verified,
+    /// Has a verifying-kind evidence (file/url) but NONE resolve — names the
+    /// first offender + a human reason so readiness can guide the fix.
+    Unresolved {
+        kind: EvidenceKind,
+        value: String,
+        reason: String,
+    },
+    /// Only honor-level note(s) — never proves coverage (b1 invariant).
+    NoteOnly,
+    /// No evidence at all.
+    Empty,
+}
+
 impl fmt::Display for Evidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}", self.kind, self.value)
@@ -777,6 +868,113 @@ mod tests {
         assert!(!has_verifying_evidence(&[note("did it"), note("really")]));
         // at least one file/url ⇒ verifying (mixed is fine).
         assert!(has_verifying_evidence(&[note("did it"), file]));
+    }
+
+    #[test]
+    fn url_format_matrix() {
+        // FORMAT-only (v1 NO-NETWORK): well-formed ⇔ http/https scheme + "://" +
+        // non-empty host. Never a reachability/HTTP check.
+        for bad in [
+            "",
+            "   ",
+            "notaurl",
+            "ftp://host/x",
+            "http://",
+            "://x",
+            "https://",
+        ] {
+            assert!(
+                !is_well_formed_url(bad),
+                "{bad:?} must NOT be well-formed (FALSE-PASS guard)"
+            );
+        }
+        for good in [
+            "https://x/y",
+            "http://example.com",
+            "HTTPS://Example.com/Path",
+            "https://host:8080/p",
+        ] {
+            assert!(is_well_formed_url(good), "{good:?} must be well-formed");
+        }
+    }
+
+    #[test]
+    fn verify_evidence_matrix() {
+        let file = |v: &str| Evidence {
+            kind: EvidenceKind::File,
+            value: v.into(),
+        };
+        let url = |v: &str| Evidence {
+            kind: EvidenceKind::Url,
+            value: v.into(),
+        };
+        let note = |v: &str| Evidence {
+            kind: EvidenceKind::Note,
+            value: v.into(),
+        };
+        let absent = |_: &str| false;
+        let present = |_: &str| true;
+
+        // empty list ⇒ Empty.
+        assert_eq!(verify_evidence(&[], absent), EvidenceVerdict::Empty);
+        // note-only ⇒ NoteOnly (b1 invariant preserved).
+        assert_eq!(
+            verify_evidence(&[note("did it"), note("really")], absent),
+            EvidenceVerdict::NoteOnly
+        );
+        // missing file (THE false-pass guard) ⇒ Unresolved naming the file.
+        match verify_evidence(&[file("x.pdf")], absent) {
+            EvidenceVerdict::Unresolved { kind, value, .. } => {
+                assert_eq!(kind, EvidenceKind::File);
+                assert_eq!(value, "x.pdf");
+            }
+            other => panic!("missing file must be Unresolved, got {other:?}"),
+        }
+        // directory / not-a-file ⇒ oracle false ⇒ Unresolved.
+        assert!(matches!(
+            verify_evidence(&[file("somedir")], absent),
+            EvidenceVerdict::Unresolved { .. }
+        ));
+        // empty / whitespace path ⇒ Unresolved, no panic.
+        assert!(matches!(
+            verify_evidence(&[file("")], absent),
+            EvidenceVerdict::Unresolved { .. }
+        ));
+        assert!(matches!(
+            verify_evidence(&[file("   ")], absent),
+            EvidenceVerdict::Unresolved { .. }
+        ));
+        // existing file ⇒ Verified.
+        assert_eq!(
+            verify_evidence(&[file("x")], present),
+            EvidenceVerdict::Verified
+        );
+        // malformed url ⇒ Unresolved naming the url (oracle irrelevant — pure).
+        match verify_evidence(&[url("notaurl")], absent) {
+            EvidenceVerdict::Unresolved { kind, value, .. } => {
+                assert_eq!(kind, EvidenceKind::Url);
+                assert_eq!(value, "notaurl");
+            }
+            other => panic!("malformed url must be Unresolved, got {other:?}"),
+        }
+        // well-formed url ⇒ Verified (no network).
+        assert_eq!(
+            verify_evidence(&[url("https://x/y")], absent),
+            EvidenceVerdict::Verified
+        );
+        // mixed: note + missing file ⇒ Unresolved (first verifying-kind offender).
+        match verify_evidence(&[note("n"), file("gone.pdf")], absent) {
+            EvidenceVerdict::Unresolved { kind, value, .. } => {
+                assert_eq!(kind, EvidenceKind::File);
+                assert_eq!(value, "gone.pdf");
+            }
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+        // mixed: missing file + existing file ⇒ Verified (any resolving wins).
+        assert_eq!(
+            verify_evidence(&[file("gone"), file("here")], |p| p == "here"),
+            EvidenceVerdict::Verified
+        );
     }
 
     #[test]
