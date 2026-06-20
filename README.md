@@ -46,15 +46,15 @@ muster control add-implementation arch --impl-id rust --ref-file report.json --r
 muster is a single static binary, no runtime, no database.
 
 ```bash
-# From crates.io (once published):
-cargo install muster
-
-# Or straight from source:
-cargo install --git https://github.com/peiman/muster
+# From git (works today — names the `muster` package in the workspace):
+cargo install --git https://github.com/peiman/muster muster
 
 # Or build the repo and put the binary on your PATH:
 git clone https://github.com/peiman/muster && cd muster
 cargo build --release          # → target/release/muster
+
+# From crates.io — once published:
+# cargo install muster
 ```
 
 Verify: `muster version`. Requires a recent stable Rust toolchain (see

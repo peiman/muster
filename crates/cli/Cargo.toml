@@ -1,5 +1,8 @@
 [package]
-name = "cli"
+# Package == binary == repo name so `cargo install --git <url> muster` and
+# (once published) `cargo install muster` resolve unambiguously. The crate still
+# lives at crates/cli/ (the layer's role); only the published package id is `muster`.
+name = "muster"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
