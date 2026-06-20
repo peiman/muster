@@ -41,6 +41,25 @@ muster control import conformance-mapping.toml --prefix requirements
 muster control add-implementation arch --impl-id rust --ref-file report.json --ref-anchor a.b.status
 ```
 
+## Install
+
+muster is a single static binary, no runtime, no database.
+
+```bash
+# From crates.io (once published):
+cargo install muster
+
+# Or straight from source:
+cargo install --git https://github.com/peiman/muster
+
+# Or build the repo and put the binary on your PATH:
+git clone https://github.com/peiman/muster && cd muster
+cargo build --release          # → target/release/muster
+```
+
+Verify: `muster version`. Requires a recent stable Rust toolchain (see
+`rust-toolchain.toml`).
+
 ## Quick start
 
 ```bash
@@ -54,6 +73,15 @@ muster explain                                # intent -> command map (no manual
 
 Every command supports `--output json` whose fields mirror the human text exactly
 (dual surface, one source of truth). Exit codes are honest; errors name the fix.
+
+## Examples
+
+- [`examples/ckeletin-feedback/`](examples/ckeletin-feedback/) — a worked,
+  runnable example: governing a spec's feedback cycle (intake → triage → decide
+  → implement → verify), with glue controls that read the real register and each
+  consumer's live conformance report. The best five-minute tour of the whole
+  idea — and it shows muster as an *optional* live view over a process that also
+  enforces standalone in CI.
 
 ## Design
 

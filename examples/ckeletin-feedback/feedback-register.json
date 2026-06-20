@@ -1,0 +1,31 @@
+{
+  "items": [
+    {
+      "id": "FB-001",
+      "reporter": "muster",
+      "spec_rule": "CKSPEC-OUT-004",
+      "summary": "audit-log path is not configurable per run",
+      "status": "accepted",
+      "decision": "update",
+      "rationale": "real gap — add --audit-path to the OUT spec; shipped in 0.9.0"
+    },
+    {
+      "id": "FB-002",
+      "reporter": "workhorse",
+      "spec_rule": "CKSPEC-ARCH-004",
+      "summary": "is a second domain crate allowed, or one only?",
+      "status": "discussing",
+      "decision": "discuss",
+      "rationale": "need the reporter to confirm the intended layer boundary before deciding"
+    },
+    {
+      "id": "FB-003",
+      "reporter": "an-agent",
+      "spec_rule": "CKSPEC-CL-002",
+      "summary": "add an interactive REPL mode to the CLI surface",
+      "status": "rejected",
+      "decision": "reject",
+      "rationale": "out of scope: the spec is batch-first / agent-drivable by design"
+    }
+  ]
+}

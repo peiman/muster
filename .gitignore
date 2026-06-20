@@ -16,3 +16,4 @@ sbom.cdx.json
 
 # workhorse run telemetry (not muster source)
 .workhorse/
+examples/**/.muster/
