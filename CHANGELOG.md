@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offending artifact and the fix command. Default-on — a named-but-absent
   artifact never reads green. (Breaking for stores that pointed `file`/`url`
   evidence at artifacts that are not present at read time.)
+- **Honesty: honor-VERIFIED now gates `proven` processes too.** An active
+  process is listed `proven` only when at least one of its evidence items is a
+  verifying artifact that RESOLVES (an existing file / a well-formed url),
+  mirroring control coverage; a process whose only evidence is a missing file or
+  a malformed url — like a note-only one — is `asserted`, not `proven`. Closes a
+  false-green where a serialized truth claim backed by an absent artifact read
+  proven. A `url` host that is empty-after-trim or contains whitespace
+  (`http://  `, `https://x /y`) is now correctly rejected as malformed.
 
 ### Added
 
