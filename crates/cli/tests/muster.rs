@@ -471,6 +471,73 @@ fn note_only_still_gaps_e2e() {
     );
 }
 
+/// honor-VERIFIED for PROCESS proven/asserted (SC-2) — an active process whose
+/// only evidence is a MISSING file is `asserted`, NOT `proven` (false-green
+/// caught), mirroring the control honor-VERIFIED upgrade.
+#[test]
+fn process_missing_file_evidence_is_asserted_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "set-status", "p1", "active"]);
+    data(
+        &d,
+        &[
+            "process",
+            "attach-evidence",
+            "p1",
+            "file",
+            "does-not-exist.pdf",
+        ],
+    );
+    let r = data(&d, &["readiness"]);
+    assert!(
+        r["asserted"].as_array().unwrap().iter().any(|x| x == "p1"),
+        "a missing-file process must be asserted: {:?}",
+        r["asserted"]
+    );
+    assert!(
+        !r["proven"].as_array().unwrap().iter().any(|x| x == "p1"),
+        "a missing-file process must NOT be proven (false-green caught): {:?}",
+        r["proven"]
+    );
+}
+
+/// honor-VERIFIED for PROCESS proven/asserted (SC-2) — an active process whose
+/// evidence is a real EXISTING file is `proven`.
+#[test]
+fn process_existing_file_evidence_is_proven_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let f = tmp.path().join("real-process-evidence.txt");
+    std::fs::write(&f, b"ran\n").unwrap();
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "set-status", "p1", "active"]);
+    data(
+        &d,
+        &[
+            "process",
+            "attach-evidence",
+            "p1",
+            "file",
+            f.to_str().unwrap(),
+        ],
+    );
+    let r = data(&d, &["readiness"]);
+    assert!(
+        r["proven"].as_array().unwrap().iter().any(|x| x == "p1"),
+        "a real existing-file process must be proven: {:?}",
+        r["proven"]
+    );
+    assert!(
+        !r["asserted"].as_array().unwrap().iter().any(|x| x == "p1"),
+        "a proven process must not also be asserted: {:?}",
+        r["asserted"]
+    );
+}
+
 /// SC-10 — a cycle is detected, both readiness and tree terminate.
 #[test]
 fn cycle_terminates() {

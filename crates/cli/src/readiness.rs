@@ -144,12 +144,25 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         }
     }
 
+    // honor-VERIFIED for the proven/asserted split (mirrors the control
+    // `evidence_index` loop above): a process's verifying artifact counts toward
+    // `proven` only if it RESOLVES (a `file` exists / a `url` is well-formed). The
+    // cli owns the fs boundary (#8): inject `Path::is_file` into the pure
+    // `domain::verify_evidence` (SSOT — same helper as control coverage).
+    let mut process_evidence_index: BTreeMap<String, EvidenceVerdict> = BTreeMap::new();
+    for p in s.processes.values() {
+        process_evidence_index.insert(
+            p.id.clone(),
+            domain::verify_evidence(&p.evidence, |path| Path::new(path).is_file()),
+        );
+    }
+
     let result = domain::readiness_with(
         &s,
         args.process.as_deref(),
         &index,
         &evidence_index,
-        &BTreeMap::new(),
+        &process_evidence_index,
         store::source_freshness_secs(),
     );
     let next = if result.verdict == "READY" {
