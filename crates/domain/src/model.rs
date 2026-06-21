@@ -266,7 +266,8 @@ pub fn has_verifying_evidence(evidence: &[Evidence]) -> bool {
 /// scheme, then `://`, then a non-empty host. Pure std string ops (no `url`
 /// crate, no I/O — stays domain-pure, #8). Rejects `""`, whitespace, `notaurl`
 /// (no scheme), `ftp://h` (wrong scheme), `http://` (empty host), `://x` (empty
-/// scheme).
+/// scheme). A host that is empty-after-trim (`http://  `) or contains inner
+/// whitespace (`https://x /y`) is malformed and rejected.
 pub fn is_well_formed_url(value: &str) -> bool {
     let Some((scheme, rest)) = value.split_once("://") else {
         return false;
@@ -275,9 +276,10 @@ pub fn is_well_formed_url(value: &str) -> bool {
     if scheme != "http" && scheme != "https" {
         return false;
     }
-    // Host is everything up to the first '/', '?' or '#'; must be non-empty.
+    // Host is everything up to the first '/', '?' or '#'; must be non-empty and
+    // whitespace-free (a blank or space-containing host is malformed).
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    !host.is_empty()
+    !host.trim().is_empty() && !host.chars().any(char::is_whitespace)
 }
 
 /// The honest verifying verdict for an evidence list, given a file-existence
@@ -882,6 +884,14 @@ mod tests {
             "http://",
             "://x",
             "https://",
+            // whitespace-host (FALSE-PASS guard): empty-after-trim or inner space.
+            "http://  ",
+            "https://x /y",
+            "http:// ",
+            "https://ho st",
+            // empty host BEFORE the query/fragment delimiter is still no host.
+            "https://?q",
+            "https://#frag",
         ] {
             assert!(
                 !is_well_formed_url(bad),
@@ -893,6 +903,9 @@ mod tests {
             "http://example.com",
             "HTTPS://Example.com/Path",
             "https://host:8080/p",
+            // host extraction before the first '/', '?', '#' (query/fragment branch).
+            "https://host/p?q",
+            "https://host#frag",
         ] {
             assert!(is_well_formed_url(good), "{good:?} must be well-formed");
         }
