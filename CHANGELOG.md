@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`muster readiness --require-ready` — a native CI gate.** Exits **3** when the
+  (optionally `--process`-scoped) store is not READY, while still rendering the
+  full readiness output (human or JSON) so the operator/agent sees *why*. Without
+  the flag, `readiness` always exits `0` (additive, zero regression). Documented
+  exit-code contract `0`/`1`/`2`/`3`: `0` = ready / gate passed (or no gate),
+  `1` = command error, `2` = CLI usage error (the argument parser's code,
+  reserved — never emitted by the gate), `3` = gate not met. Enforces muster's
+  "never show green when the source is red" thesis at the CI exit boundary.
+
 ### Changed
 
 - **Honesty: note-only evidence no longer counts toward READY.** A hand-set

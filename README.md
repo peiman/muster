@@ -74,6 +74,26 @@ muster explain                                # intent -> command map (no manual
 Every command supports `--output json` whose fields mirror the human text exactly
 (dual surface, one source of truth). Exit codes are honest; errors name the fix.
 
+### Exit codes
+
+muster fails honestly at the process boundary — a CI pipeline (or an agent) can
+branch on *why* a run failed:
+
+| Code | Meaning |
+|---|---|
+| `0` | success — the command ran, and any readiness gate passed (or no gate was requested) |
+| `1` | command error — a missing/uninitialized store, a bad `--process` scope, IO, or config/log init; rendered as the JSON error envelope (`status: "error"`) in JSON mode |
+| `2` | CLI usage error (unknown flag, malformed args) — **reserved**; emitted by the argument parser before muster's own logic runs. muster never produces it itself. |
+| `3` | `readiness --require-ready` **gate not met** — the (optionally `--process`-scoped) verdict is not `READY`. The full readiness output is still rendered (human or JSON); only the exit code differs. |
+
+`muster readiness --require-ready` is the native CI gate: it exits `3` when the
+store is not READY so the build fails honestly — "never show green when the
+source is red" — while still printing the verdict and gap findings so you see
+*why*. Without the flag, `readiness` always exits `0`. A gate miss is a
+*successful* computation that did not meet the bar, so it is deliberately **not**
+the error envelope (`1`) and **not** the usage code (`2`) — the three non-zero
+signals stay distinct.
+
 ## Configuration (environment)
 
 muster is zero-config; these env knobs only tune honesty/freshness policy:
