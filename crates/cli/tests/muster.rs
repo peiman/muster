@@ -1910,32 +1910,68 @@ fn no_flag_ready_exits_0() {
     assert_eq!(code, Some(0));
 }
 
-/// SC-6 — the gate honors `--process` scope: a not-READY scope exits 3, a READY
-/// scope exits 0, in the SAME store.
+/// A store whose GLOBAL verdict diverges from its per-process scoped verdicts,
+/// making `--process` load-bearing for the gate. Verified against the binary:
+///   readiness --require-ready                        → 3 (global GAPS)
+///   readiness --require-ready --process prop-ready    → 0 (scoped READY)
+///   readiness --require-ready --process active-gappy  → 3 (scoped GAPS)
+///
+/// The gap model is monotonic under scope-widening, so the only achievable
+/// divergence is *global GAPS + a scoped READY sub-graph*: `active-gappy` drags
+/// the global verdict to GAPS while `prop-ready`'s own sub-graph stays READY.
+fn build_scope_divergent_store(d: &Path) {
+    init(d);
+    // proposed, empty sub-graph → scoped READY
+    data(d, &["process", "add", "prop-ready", "--name", "Ready"]);
+    // active with no risks/metrics/controls → scoped GAPS (and drags global to GAPS)
+    data(d, &["process", "add", "active-gappy", "--name", "Gappy"]);
+    data(d, &["process", "set-status", "active-gappy", "active"]);
+}
+
+/// SC-6 — the gate reads `--process`: a not-READY scope gates while a READY
+/// sibling in the SAME store passes. The embedded `--process prop-ready -> 0`
+/// assertion is what fails if the gate ever scopes on the global None verdict
+/// (under which EVERY `--process` call returns the global code 3).
 #[test]
 fn require_ready_scoped_not_ready_exits_3() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
-    init(&d);
-    // active1: active with no risks/metrics/controls → scoped verdict GAPS.
-    data(&d, &["process", "add", "active1", "--name", "A"]);
-    data(&d, &["process", "set-status", "active1", "active"]);
-    let (code, _) = run_code(
+    build_scope_divergent_store(&d);
+    let (gappy, _) = run_code(
         &d,
-        &["readiness", "--require-ready", "--process", "active1"],
+        &["readiness", "--require-ready", "--process", "active-gappy"],
     );
-    assert_eq!(code, Some(3), "a not-READY scope gates");
+    assert_eq!(gappy, Some(3), "a not-READY --process scope gates");
+    let (ready, _) = run_code(
+        &d,
+        &["readiness", "--require-ready", "--process", "prop-ready"],
+    );
+    assert_eq!(
+        ready,
+        Some(0),
+        "the READY sibling scope passes — --process is load-bearing"
+    );
 }
 
+/// SC-6 — the gate reads `--process`: global GAPS, but a READY scope passes.
+/// Load-bearing — if the gate scoped on the global (None) verdict this is RED
+/// (the `--process prop-ready` call would return the global code 3, not 0).
 #[test]
 fn require_ready_scoped_ready_exits_0() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
-    init(&d);
-    // prop1: proposed process, no controls → scoped verdict READY.
-    data(&d, &["process", "add", "prop1", "--name", "P"]);
-    let (code, _) = run_code(&d, &["readiness", "--require-ready", "--process", "prop1"]);
-    assert_eq!(code, Some(0), "a READY scope passes");
+    build_scope_divergent_store(&d);
+    let (global, _) = run_code(&d, &["readiness", "--require-ready"]);
+    assert_eq!(global, Some(3), "store diverges: the GLOBAL gate is GAPS");
+    let (scoped, _) = run_code(
+        &d,
+        &["readiness", "--require-ready", "--process", "prop-ready"],
+    );
+    assert_eq!(
+        scoped,
+        Some(0),
+        "a READY --process scope passes despite global GAPS"
+    );
 }
 
 /// SC-7 — JSON envelope + non-zero are INDEPENDENT channels: gaps + `--require-ready
