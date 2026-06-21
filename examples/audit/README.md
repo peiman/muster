@@ -99,7 +99,31 @@ gap finding holds it back even though the number would pass.
 **3. muster is an optional view.** The same bars enforce in CI with no muster at
 all — `./ci-check.sh` reads the very same evidence files and fails the build if
 any control's bar is unmet. `muster readiness` is that truth rendered as a
-living, clause-mapped process map for the auditor.
+living, clause-mapped process map for the auditor. Either way, CI fails honestly:
+
+```sh
+# enforce WITHOUT muster (muster is an optional view):
+./ci-check.sh
+
+# OR the muster-native CI gate (same truth, one primitive):
+muster readiness --require-ready    # exits 3 on gaps, 0 when READY
+```
+
+`--require-ready` makes `muster readiness` exit non-zero when the store is not
+READY, while still printing the full verdict so CI logs show *why*. On this
+example's default scope it exits **3** (a real run):
+
+```text
+$ muster readiness --require-ready; echo "exit=$?"
+readiness: GAPS: 1
+  control coverage: 4/5 applicable implemented-with-evidence (80%)
+    gap: a5-1 — status is not_started, not implemented-with-evidence
+  ...
+exit=3
+```
+
+(Exit-code contract: `0` = READY / gate passed, `1` = command error, `2` = CLI
+usage error, `3` = gate not met. See the repo README → "Exit codes are honest".)
 
 ## How a real audit maps onto this
 

@@ -2,7 +2,9 @@
 # Enforce audit-readiness in CI WITHOUT muster — proving muster is an optional
 # *view*, not a dependency. Exits non-zero (fails the build) if any control's
 # real evidence no longer meets its bar. `muster readiness` is the same truth
-# rendered as a living, clause-mapped process map.
+# rendered as a living, clause-mapped process map. For the muster-native CI gate
+# (same truth, one primitive), use: `muster readiness --require-ready` (exits 3
+# on gaps, 0 when READY).
 set -e
 cd "$(dirname "$0")"
 
