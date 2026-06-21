@@ -17,7 +17,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-type Boxed = Result<i32, Box<dyn std::error::Error>>;
+type Boxed = Result<crate::Outcome, Box<dyn std::error::Error>>;
 
 /// One control's ref-kind drift profile (SC-3): the honesty risk of its weakest
 /// link, drawn from the fixed set `live_resolved | cached_command | stale |
@@ -183,10 +183,10 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
     // are independent channels. A gate miss is a SUCCESSFUL computation that did not
     // meet the bar, never an error envelope.
     output.success("readiness", &view, &mut io::stdout())?;
-    let code = if args.require_ready && !result.is_ready() {
-        crate::EXIT_GATE_NOT_MET
+    let outcome = if args.require_ready && !result.is_ready() {
+        crate::Outcome::GateNotMet
     } else {
-        crate::EXIT_OK
+        crate::Outcome::Ok
     };
-    Ok(code)
+    Ok(outcome)
 }

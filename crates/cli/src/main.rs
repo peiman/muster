@@ -38,6 +38,27 @@ pub(crate) const EXIT_ERROR: i32 = 1;
 /// and the README.
 pub(crate) const EXIT_GATE_NOT_MET: i32 = 3;
 
+/// The success outcome of a command dispatch. Makes illegal exit states
+/// unrepresentable: a successful command can only resolve to `Ok` (0) or the
+/// readiness gate's `GateNotMet` (3) — never clap's 2 or the error code 1.
+/// `code()` is the SSOT numeric mapping, delegating to the exit constants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// READY / gate passed / no gate requested.
+    Ok,
+    /// `readiness --require-ready` ran successfully but did not meet the bar.
+    GateNotMet,
+}
+
+impl Outcome {
+    pub(crate) fn code(self) -> i32 {
+        match self {
+            Outcome::Ok => EXIT_OK,
+            Outcome::GateNotMet => EXIT_GATE_NOT_MET,
+        }
+    }
+}
+
 fn main() {
     std::process::exit(run());
 }
@@ -61,8 +82,10 @@ fn run() -> i32 {
     match run_inner(cli) {
         Ok((_guard, code)) => {
             // _guard holds the LogGuard for its lifetime here, ensuring the
-            // audit worker flushes when run() returns. `code` is EXIT_OK for every
-            // command except a `readiness --require-ready` gate miss (EXIT_GATE_NOT_MET).
+            // audit worker flushes when run() returns. `code` is `outcome.code()`:
+            // EXIT_OK for every command except a `readiness --require-ready` gate
+            // miss (EXIT_GATE_NOT_MET). It can never be EXIT_ERROR or clap's 2 —
+            // the `Outcome` type makes those unrepresentable on the success path.
             code
         }
         Err(RunError::PreConfig { error }) => {
@@ -303,37 +326,54 @@ fn run_inner(cli: root::Cli) -> Result<(LogGuard, i32), RunError> {
     // Dispatch to command handler. On failure, wrap the error as PostConfig so
     // the caller receives the guard alongside the error — keeping the audit
     // worker alive through error rendering (CKSPEC-OUT-004 fix).
-    // Each arm yields an exit code: the readiness handler returns its gate code
-    // (EXIT_OK or EXIT_GATE_NOT_MET), every other command maps a successful
-    // `Ok(())` to EXIT_OK. The code is carried out of the dispatch so run() can
-    // return it verbatim — keeping the exit-code policy in the cli (not domain).
-    let dispatch_result: Result<i32, Box<dyn std::error::Error>> = match cli.command {
-        root::Commands::Init => init::execute(&output).map(|()| EXIT_OK),
-        root::Commands::Explain => explain::execute(&output).map(|()| EXIT_OK),
-        root::Commands::Process(c) => process::execute(c.sub, &output).map(|()| EXIT_OK),
-        root::Commands::Control(c) => control::execute(c.sub, &output).map(|()| EXIT_OK),
-        root::Commands::Incident(c) => incident::execute(c.sub, &output).map(|()| EXIT_OK),
+    // Each arm yields an `Outcome`: the readiness handler returns its gate
+    // outcome (Outcome::Ok or Outcome::GateNotMet), every other command maps a
+    // successful `Ok(())` to Outcome::Ok. The outcome's `code()` is carried out
+    // of the dispatch so run() can return it verbatim — keeping the exit-code
+    // policy in the cli (not domain). The `Outcome` type makes it impossible for
+    // a successful command to forge clap's 2 or the error code 1.
+    let dispatch_result: Result<Outcome, Box<dyn std::error::Error>> = match cli.command {
+        root::Commands::Init => init::execute(&output).map(|()| Outcome::Ok),
+        root::Commands::Explain => explain::execute(&output).map(|()| Outcome::Ok),
+        root::Commands::Process(c) => process::execute(c.sub, &output).map(|()| Outcome::Ok),
+        root::Commands::Control(c) => control::execute(c.sub, &output).map(|()| Outcome::Ok),
+        root::Commands::Incident(c) => incident::execute(c.sub, &output).map(|()| Outcome::Ok),
         root::Commands::Nonconformity(c) => {
-            nonconformity::execute(c.sub, &output).map(|()| EXIT_OK)
+            nonconformity::execute(c.sub, &output).map(|()| Outcome::Ok)
         }
         root::Commands::Readiness(a) => readiness::execute(a, &output),
         root::Commands::Ping => ping::execute(&output)
-            .map(|()| EXIT_OK)
+            .map(|()| Outcome::Ok)
             .map_err(|e| Box::new(e) as _),
         root::Commands::Version => version::execute(&output)
-            .map(|()| EXIT_OK)
+            .map(|()| Outcome::Ok)
             .map_err(|e| Box::new(e) as _),
         root::Commands::Catalog => catalog::execute(&output)
-            .map(|()| EXIT_OK)
+            .map(|()| Outcome::Ok)
             .map_err(|e| Box::new(e) as _),
     };
 
     match dispatch_result {
-        Ok(code) => Ok((guard, code)),
+        Ok(outcome) => Ok((guard, outcome.code())),
         Err(error) => Err(RunError::PostConfig {
             guard,
             error,
             json_mode,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EXIT_GATE_NOT_MET, EXIT_OK, Outcome};
+
+    /// Pin the numeric exit-code contract that `Outcome::code()` is the SSOT for:
+    /// Ok => 0 (gate passed / no gate), GateNotMet => 3 (ran but did not meet the
+    /// bar). A future edit to `code()` that breaks the documented contract is
+    /// caught here.
+    #[test]
+    fn outcome_code_is_pinned() {
+        assert_eq!(Outcome::Ok.code(), EXIT_OK); // 0
+        assert_eq!(Outcome::GateNotMet.code(), EXIT_GATE_NOT_MET); // 3
     }
 }
