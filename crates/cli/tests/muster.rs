@@ -1794,3 +1794,212 @@ fn ssot_live_refs_persist_no_resolved_cache() {
         "live file_anchor must not persist a resolved copy: {body}"
     );
 }
+
+// ── `--require-ready` native CI gate ───────────────────────────────────────────
+// The gate is a trust boundary: a successful readiness computation that simply did
+// not meet the bar. Exit-code contract (documented in `readiness --help` + README):
+//   0 = READY / gate passed (or no gate); 1 = command error; 2 = clap usage error
+//   (emitted by clap before our code runs); 3 = gate not met (full output still
+//   rendered). These tests pin that contract — the false-pass guard (SC-2) is the
+//   anti-"green over red" keystone.
+
+/// Run a command, returning (exit_code, stdout) WITHOUT asserting success.
+fn run_code(dir: &Path, args: &[&str]) -> (Option<i32>, String) {
+    let out = muster(dir).args(args).output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// Build a GAPS store: an implemented control whose ONLY evidence is a note
+/// (honor-level) — verdict starts "GAPS:" (mirrors `note_only_still_gaps_e2e`).
+fn build_gaps_store(d: &Path) {
+    init(d);
+    data(d, &["control", "add", "c1", "--title", "C1"]);
+    data(d, &["control", "set-status", "c1", "implemented"]);
+    data(d, &["control", "attach-evidence", "c1", "note", "did it"]);
+}
+
+/// Build a READY store: an implemented control with an EXISTING file artifact —
+/// fully covered, no gaps (mirrors `existing_file_evidence_is_covered_e2e`).
+fn build_ready_store(tmp: &TempDir, d: &Path) {
+    init(d);
+    let f = tmp.path().join("real-evidence.pdf");
+    std::fs::write(&f, b"signed\n").unwrap();
+    data(d, &["control", "add", "c1", "--title", "C1"]);
+    data(d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            f.to_str().unwrap(),
+        ],
+    );
+}
+
+/// SC-2 / SC-9 — THE false-pass guard: a store WITH gaps + `--require-ready` exits
+/// with code 3 (non-zero). Goes RED if the gate is ever wired backwards or no-op'd
+/// — the exact "green over red" muster exists to prevent.
+#[test]
+fn require_ready_false_pass_guard_gaps_exits_3() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_gaps_store(&d);
+    let (code, _stdout) = run_code(&d, &["readiness", "--require-ready"]);
+    assert_eq!(
+        code,
+        Some(3),
+        "gaps + --require-ready MUST exit the gate code 3"
+    );
+}
+
+/// SC-2b — the three non-zero CI signals are mutually distinct: gate-not-met (3),
+/// clap usage error (2), and command error (1) never collapse onto one code.
+#[test]
+fn require_ready_codes_are_distinct() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_gaps_store(&d);
+    let (gate, _) = run_code(&d, &["readiness", "--require-ready"]);
+    let (usage, _) = run_code(&d, &["readiness", "--require-ready", "--not-a-real-flag"]);
+
+    // Missing store: a fresh dir with no `init`.
+    let tmp2 = TempDir::new().unwrap();
+    let d2 = data_dir(&tmp2);
+    let (cmd_err, _) = run_code(&d2, &["readiness", "--require-ready"]);
+
+    assert_eq!(gate, Some(3), "gate-not-met code");
+    assert_eq!(usage, Some(2), "clap usage-error code");
+    assert_eq!(cmd_err, Some(1), "command-error code");
+    assert_ne!(gate, usage);
+    assert_ne!(gate, cmd_err);
+    assert_ne!(usage, cmd_err);
+}
+
+/// SC-3 — a READY store + `--require-ready` exits 0.
+#[test]
+fn require_ready_ready_store_exits_0() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_ready_store(&tmp, &d);
+    let (code, _) = run_code(&d, &["readiness", "--require-ready"]);
+    assert_eq!(code, Some(0), "READY + --require-ready exits 0");
+}
+
+/// SC-4 — no flag, gaps store → exit 0 (additive; no regression).
+#[test]
+fn no_flag_gaps_exits_0() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_gaps_store(&d);
+    let (code, _) = run_code(&d, &["readiness"]);
+    assert_eq!(code, Some(0), "no flag MUST exit 0 even on gaps");
+}
+
+/// SC-5 — no flag, READY store → exit 0.
+#[test]
+fn no_flag_ready_exits_0() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_ready_store(&tmp, &d);
+    let (code, _) = run_code(&d, &["readiness"]);
+    assert_eq!(code, Some(0));
+}
+
+/// SC-6 — the gate honors `--process` scope: a not-READY scope exits 3, a READY
+/// scope exits 0, in the SAME store.
+#[test]
+fn require_ready_scoped_not_ready_exits_3() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // active1: active with no risks/metrics/controls → scoped verdict GAPS.
+    data(&d, &["process", "add", "active1", "--name", "A"]);
+    data(&d, &["process", "set-status", "active1", "active"]);
+    let (code, _) = run_code(
+        &d,
+        &["readiness", "--require-ready", "--process", "active1"],
+    );
+    assert_eq!(code, Some(3), "a not-READY scope gates");
+}
+
+#[test]
+fn require_ready_scoped_ready_exits_0() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // prop1: proposed process, no controls → scoped verdict READY.
+    data(&d, &["process", "add", "prop1", "--name", "P"]);
+    let (code, _) = run_code(&d, &["readiness", "--require-ready", "--process", "prop1"]);
+    assert_eq!(code, Some(0), "a READY scope passes");
+}
+
+/// SC-7 — JSON envelope + non-zero are INDEPENDENT channels: gaps + `--require-ready
+/// --output json` emits a valid readiness JSON envelope on stdout AND exits 3.
+#[test]
+fn require_ready_json_envelope_and_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_gaps_store(&d);
+    let out = muster(&d)
+        .args(["readiness", "--require-ready", "--output", "json"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "gate still exits 3 in JSON mode"
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("stdout is valid JSON");
+    assert_eq!(
+        v["status"], "success",
+        "gate-not-met is NOT an error envelope"
+    );
+    assert!(
+        v["data"]["verdict"].as_str().unwrap().starts_with("GAPS:"),
+        "verdict is rendered: {:?}",
+        v["data"]["verdict"]
+    );
+    assert!(
+        v["data"]["gap_findings"].is_array(),
+        "gap_findings rendered so the operator sees WHY"
+    );
+}
+
+/// SC-8 — fail-clean: a missing/uninitialized store + `--require-ready` exits 1
+/// (the normal command-error envelope), NOT 0, NOT 2, NOT the gate code 3.
+#[test]
+fn require_ready_missing_store_fails_clean() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp); // no init
+    let (code, _) = run_code(&d, &["readiness", "--require-ready"]);
+    assert_eq!(
+        code,
+        Some(1),
+        "a missing store is a command error, not a gate failure"
+    );
+    let (_ok, v) = run_json(&d, &["readiness", "--require-ready"]);
+    assert_eq!(
+        v["status"], "error",
+        "fail-clean renders the error envelope"
+    );
+}
+
+/// SC-10 — the flag is purely additive to the EXIT channel: the rendered `data`
+/// object is content-identical with and without `--require-ready`.
+#[test]
+fn require_ready_does_not_change_output_content() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    build_gaps_store(&d);
+    let without = data(&d, &["readiness"]);
+    let (_ok, with_env) = run_json(&d, &["readiness", "--require-ready"]);
+    assert_eq!(
+        without, with_env["data"],
+        "the readiness `data` must be content-identical with/without the flag"
+    );
+}

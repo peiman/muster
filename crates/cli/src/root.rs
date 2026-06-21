@@ -472,4 +472,11 @@ pub struct ReadinessArgs {
     /// Scope to one process and its reachable sub-graph
     #[arg(long = "process")]
     pub process: Option<String>,
+    /// Exit non-zero (code 3) when the (optionally --process-scoped) store is not
+    /// READY, so CI fails honestly — "never show green when the source is red".
+    /// The full readiness output is still rendered (human or JSON); only the exit
+    /// code differs. Exit codes: 0 = ready / gate passed (or no gate); 1 = command
+    /// error; 2 = CLI usage error (clap); 3 = gate not met.
+    #[arg(long = "require-ready")]
+    pub require_ready: bool,
 }

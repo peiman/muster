@@ -23,6 +23,21 @@ use infrastructure::{
     output::{Output, OutputMode},
 };
 
+/// Success: READY / gate passed, or no `--require-ready` requested.
+pub(crate) const EXIT_OK: i32 = 0;
+/// Command error — missing/uninitialized store, bad `--process` scope, IO,
+/// config/log init. Rendered as the CKSPEC error envelope.
+pub(crate) const EXIT_ERROR: i32 = 1;
+// NOTE: exit code 2 is reserved by clap for usage errors (`parse_args` ->
+// `Error::exit` -> `safe_exit(2)`); clap emits it BEFORE `run()` executes, so we
+// never produce it here. The gate code MUST avoid 2 so a typo'd flag (2) and a
+// not-ready gate (3) remain distinct CI signals.
+/// `--require-ready` gate not met: a SUCCESSFUL readiness computation that did not
+/// meet the bar (the full output is still rendered). Distinct from `EXIT_OK` (0),
+/// `EXIT_ERROR` (1), and clap's usage code (2). Documented in `readiness --help`
+/// and the README.
+pub(crate) const EXIT_GATE_NOT_MET: i32 = 3;
+
 fn main() {
     std::process::exit(run());
 }
@@ -44,10 +59,11 @@ fn run() -> i32 {
     let explicit_output = cli.output.clone();
 
     match run_inner(cli) {
-        Ok((_guard, ())) => {
+        Ok((_guard, code)) => {
             // _guard holds the LogGuard for its lifetime here, ensuring the
-            // audit worker flushes when run() returns.
-            0
+            // audit worker flushes when run() returns. `code` is EXIT_OK for every
+            // command except a `readiness --require-ready` gate miss (EXIT_GATE_NOT_MET).
+            code
         }
         Err(RunError::PreConfig { error }) => {
             // Config load failed — output mode is CLI flag only (no config yet).
@@ -63,7 +79,7 @@ fn run() -> i32 {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             );
-            1
+            EXIT_ERROR
         }
         Err(RunError::LogInitFailed {
             error,
@@ -84,7 +100,7 @@ fn run() -> i32 {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             );
-            1
+            EXIT_ERROR
         }
         Err(RunError::PostConfig {
             guard: _guard,
@@ -110,7 +126,7 @@ fn run() -> i32 {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             );
-            1
+            EXIT_ERROR
         }
     }
 }
@@ -194,7 +210,7 @@ fn subcommand_name(command: &root::Commands) -> &'static str {
 /// outer run() can render the error while the audit worker is still alive
 /// (fixing the CKSPEC-OUT-004 gap where error events were dropped because the
 /// guard died before Output::error ran).
-fn run_inner(cli: root::Cli) -> Result<(LogGuard, ()), RunError> {
+fn run_inner(cli: root::Cli) -> Result<(LogGuard, i32), RunError> {
     // Load configuration (defaults → file → env). On failure, json_mode is
     // unknown (no config yet), so we use CLI-flag-only mode.
     let config = Config::load(cli.config.as_deref(), "MUSTER_")
@@ -287,21 +303,33 @@ fn run_inner(cli: root::Cli) -> Result<(LogGuard, ()), RunError> {
     // Dispatch to command handler. On failure, wrap the error as PostConfig so
     // the caller receives the guard alongside the error — keeping the audit
     // worker alive through error rendering (CKSPEC-OUT-004 fix).
-    let dispatch_result = match cli.command {
-        root::Commands::Init => init::execute(&output),
-        root::Commands::Explain => explain::execute(&output),
-        root::Commands::Process(c) => process::execute(c.sub, &output),
-        root::Commands::Control(c) => control::execute(c.sub, &output),
-        root::Commands::Incident(c) => incident::execute(c.sub, &output),
-        root::Commands::Nonconformity(c) => nonconformity::execute(c.sub, &output),
+    // Each arm yields an exit code: the readiness handler returns its gate code
+    // (EXIT_OK or EXIT_GATE_NOT_MET), every other command maps a successful
+    // `Ok(())` to EXIT_OK. The code is carried out of the dispatch so run() can
+    // return it verbatim — keeping the exit-code policy in the cli (not domain).
+    let dispatch_result: Result<i32, Box<dyn std::error::Error>> = match cli.command {
+        root::Commands::Init => init::execute(&output).map(|()| EXIT_OK),
+        root::Commands::Explain => explain::execute(&output).map(|()| EXIT_OK),
+        root::Commands::Process(c) => process::execute(c.sub, &output).map(|()| EXIT_OK),
+        root::Commands::Control(c) => control::execute(c.sub, &output).map(|()| EXIT_OK),
+        root::Commands::Incident(c) => incident::execute(c.sub, &output).map(|()| EXIT_OK),
+        root::Commands::Nonconformity(c) => {
+            nonconformity::execute(c.sub, &output).map(|()| EXIT_OK)
+        }
         root::Commands::Readiness(a) => readiness::execute(a, &output),
-        root::Commands::Ping => ping::execute(&output).map_err(|e| Box::new(e) as _),
-        root::Commands::Version => version::execute(&output).map_err(|e| Box::new(e) as _),
-        root::Commands::Catalog => catalog::execute(&output).map_err(|e| Box::new(e) as _),
+        root::Commands::Ping => ping::execute(&output)
+            .map(|()| EXIT_OK)
+            .map_err(|e| Box::new(e) as _),
+        root::Commands::Version => version::execute(&output)
+            .map(|()| EXIT_OK)
+            .map_err(|e| Box::new(e) as _),
+        root::Commands::Catalog => catalog::execute(&output)
+            .map(|()| EXIT_OK)
+            .map_err(|e| Box::new(e) as _),
     };
 
     match dispatch_result {
-        Ok(()) => Ok((guard, ())),
+        Ok(code) => Ok((guard, code)),
         Err(error) => Err(RunError::PostConfig {
             guard,
             error,

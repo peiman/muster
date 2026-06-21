@@ -17,7 +17,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-type Boxed = Result<(), Box<dyn std::error::Error>>;
+type Boxed = Result<i32, Box<dyn std::error::Error>>;
 
 /// One control's ref-kind drift profile (SC-3): the honesty risk of its weakest
 /// link, drawn from the fixed set `live_resolved | cached_command | stale |
@@ -165,7 +165,9 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         &process_evidence_index,
         store::source_freshness_secs(),
     );
-    let next = if result.verdict == "READY" {
+    // SSOT: the ready/not-ready decision lives in `Readiness::is_ready()` (domain),
+    // reused here by BOTH the `next` hint and the `--require-ready` gate below.
+    let next = if result.is_ready() {
         "you are certification-ready — keep evidence fresh".to_string()
     } else {
         "address a gap finding above, then re-run: muster readiness".to_string()
@@ -176,6 +178,15 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         cmd_cache_mode: cmd_cache,
     };
     let view = WithNext::new(&readiness_view, next);
+    // Render FIRST, gate SECOND: the full readiness output (human or JSON) is always
+    // emitted regardless of the gate outcome — the exit code and the rendered output
+    // are independent channels. A gate miss is a SUCCESSFUL computation that did not
+    // meet the bar, never an error envelope.
     output.success("readiness", &view, &mut io::stdout())?;
-    Ok(())
+    let code = if args.require_ready && !result.is_ready() {
+        crate::EXIT_GATE_NOT_MET
+    } else {
+        crate::EXIT_OK
+    };
+    Ok(code)
 }

@@ -32,6 +32,17 @@ pub struct Readiness {
     pub cycles: Vec<Vec<String>>,
 }
 
+impl Readiness {
+    /// True iff this readiness computation met the bar (the headline verdict is the
+    /// canonical `"READY"`). SSOT for the ready/not-ready decision — the cli's
+    /// `--require-ready` gate and the `next`-hint both consult this. Pure/serde-only:
+    /// a string check over an owned field, no process/exit/fs/clap in domain.
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.verdict == "READY"
+    }
+}
+
 /// The v1 honesty split: a control whose status is resolved from an authoritative
 /// source (`derived`) vs one hand-set without a ref (`asserted`, unverified).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1340,6 +1351,43 @@ mod tests {
         s.set_process_status("p1", ProcessStatus::Active).unwrap();
         let r = readiness(&s, None);
         assert_eq!(r.verdict, "READY", "unexpected gaps: {:?}", r.gap_findings);
+    }
+
+    #[test]
+    fn is_ready_true_only_for_ready_verdict() {
+        // SSOT predicate (reused by the cli `--require-ready` gate and the `next`
+        // hint): true ONLY for the canonical "READY" verdict, false for any GAPS.
+        let mut ready = base();
+        ready.add_risk("p1", "r").unwrap();
+        ready.add_metric("p1", "m").unwrap();
+        ready.add_control("c1", "C", None, true).unwrap();
+        ready.link_control("p1", "c1").unwrap();
+        ready
+            .set_control_status("c1", ControlStatus::Implemented)
+            .unwrap();
+        ready
+            .attach_control_evidence(
+                "c1",
+                Evidence {
+                    kind: EvidenceKind::File,
+                    value: "x".into(),
+                },
+            )
+            .unwrap();
+        ready
+            .set_process_status("p1", ProcessStatus::Active)
+            .unwrap();
+        let r = readiness(&ready, None);
+        assert_eq!(r.verdict, "READY");
+        assert!(r.is_ready(), "READY verdict ⇒ is_ready() true");
+
+        // An active process with no risks/metrics/controls gaps → GAPS, not ready.
+        let mut gaps = base();
+        gaps.set_process_status("p1", ProcessStatus::Active)
+            .unwrap();
+        let g = readiness(&gaps, None);
+        assert!(g.verdict.starts_with("GAPS:"));
+        assert!(!g.is_ready(), "a GAPS verdict ⇒ is_ready() false");
     }
 
     #[test]
