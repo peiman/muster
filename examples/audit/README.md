@@ -123,7 +123,7 @@ exit=3
 ```
 
 (Exit-code contract: `0` = READY / gate passed, `1` = command error, `2` = CLI
-usage error, `3` = gate not met. See the repo README → "Exit codes are honest".)
+usage error, `3` = gate not met. See the repo README → "Exit codes".)
 
 ## How a real audit maps onto this
 

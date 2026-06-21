@@ -29,9 +29,10 @@ pub(crate) const EXIT_OK: i32 = 0;
 /// config/log init. Rendered as the CKSPEC error envelope.
 pub(crate) const EXIT_ERROR: i32 = 1;
 // NOTE: exit code 2 is reserved by clap for usage errors (`parse_args` ->
-// `Error::exit` -> `safe_exit(2)`); clap emits it BEFORE `run()` executes, so we
-// never produce it here. The gate code MUST avoid 2 so a typo'd flag (2) and a
-// not-ready gate (3) remain distinct CI signals.
+// `Error::exit` -> `safe_exit(2)`). clap emits it DURING `run()` but before any
+// of muster's own command logic runs (parse happens before `run_inner` /
+// dispatch), so we never produce it ourselves. The gate code MUST avoid 2 so a
+// typo'd flag (2) and a not-ready gate (3) remain distinct CI signals.
 /// `--require-ready` gate not met: a SUCCESSFUL readiness computation that did not
 /// meet the bar (the full output is still rendered). Distinct from `EXIT_OK` (0),
 /// `EXIT_ERROR` (1), and clap's usage code (2). Documented in `readiness --help`
