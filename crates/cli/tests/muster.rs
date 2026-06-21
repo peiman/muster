@@ -2018,10 +2018,23 @@ fn require_ready_missing_store_fails_clean() {
         Some(1),
         "a missing store is a command error, not a gate failure"
     );
-    let (_ok, v) = run_json(&d, &["readiness", "--require-ready"]);
+    // Parse the binary's REAL stdout directly (like SC-7) — NOT via the lenient
+    // `run_json` fallback, which synthesizes `{"status":"error"}` whenever stdout
+    // is unparseable, so it would pass even on an empty or misrouted stdout.
+    let out = muster(&d)
+        .args(["readiness", "--require-ready", "--output", "json"])
+        .output()
+        .unwrap();
+    let v: Value =
+        serde_json::from_slice(&out.stdout).expect("error envelope is valid JSON on stdout");
     assert_eq!(
         v["status"], "error",
-        "fail-clean renders the error envelope"
+        "fail-clean renders the error envelope on stdout"
+    );
+    assert!(
+        v["error"].as_str().is_some_and(|s| !s.is_empty()),
+        "the error envelope carries a non-empty `error` string: {:?}",
+        v["error"]
     );
 }
 
