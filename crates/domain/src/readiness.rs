@@ -84,7 +84,14 @@ pub struct GapFinding {
 /// projections AND resolved evidence verdicts (a `file` must exist, a `url` must
 /// be well-formed).
 pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
-    readiness_with(store, scope, &BTreeMap::new(), &BTreeMap::new(), None)
+    readiness_with(
+        store,
+        scope,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        None,
+    )
 }
 
 /// The v1 truth-meter. `index` maps a control id to its honest `Derived`
@@ -103,6 +110,14 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
 /// index falls back to the kind-only `has_verifying_evidence` path (the v0 /
 /// domain-unit-test behavior), exactly mirroring the `Derived` index fallback.
 ///
+/// `process_evidence_index` maps a process id to its honest `EvidenceVerdict`
+/// (built by the cli the same way as `evidence_index`, injecting the fs oracle).
+/// It gates the proven/asserted split exactly as `evidence_index` gates control
+/// coverage: a process is `proven` only when its verdict is `Verified` (a `file`
+/// resolves / a `url` is well-formed) AND nothing refutes it. A process absent
+/// from this index falls back to the kind-only `has_verifying_evidence` path (the
+/// v0 / domain-unit-test behavior), mirroring the control evidence fallback.
+///
 /// `source_freshness_secs` is the opt-in source-age bound (b2): when `Some(b)`, a
 /// live, passing `file_anchor` whose pointed-at artifact is older than `b`
 /// seconds is held back as a coverage gap + a `ref_source_stale` finding (a
@@ -114,6 +129,7 @@ pub fn readiness_with(
     scope: Option<&str>,
     index: &BTreeMap<String, Derived>,
     evidence_index: &BTreeMap<String, EvidenceVerdict>,
+    process_evidence_index: &BTreeMap<String, EvidenceVerdict>,
     source_freshness_secs: Option<i64>,
 ) -> Readiness {
     let in_scope: BTreeSet<String> = match scope {
@@ -130,7 +146,7 @@ pub fn readiness_with(
         source_freshness_secs,
     );
     let controls = controls_split(store, scope, &in_scope, index);
-    let (proven, asserted) = proven_vs_asserted(store, &in_scope);
+    let (proven, asserted) = proven_vs_asserted(store, &in_scope, process_evidence_index);
     let refuting_signals = refuting_signals(store, &in_scope);
     let enforcement = enforcement(store, &in_scope);
     let cycles = scoped_cycles(store, scope, &in_scope);
@@ -334,7 +350,11 @@ fn nc_open(status: NonconformityStatus) -> bool {
     status != NonconformityStatus::Closed
 }
 
-fn proven_vs_asserted(store: &Store, in_scope: &BTreeSet<String>) -> (Vec<String>, Vec<String>) {
+fn proven_vs_asserted(
+    store: &Store,
+    in_scope: &BTreeSet<String>,
+    process_evidence_index: &BTreeMap<String, EvidenceVerdict>,
+) -> (Vec<String>, Vec<String>) {
     let mut proven = Vec::new();
     let mut asserted = Vec::new();
     for pid in in_scope {
@@ -347,7 +367,15 @@ fn proven_vs_asserted(store: &Store, in_scope: &BTreeSet<String>) -> (Vec<String
         }
         // Honor path (v3.1): a note-only assertion does not prove a process —
         // proven requires a verifying artifact (file/url), not just "trust me".
-        let has_verifying = crate::model::has_verifying_evidence(&p.evidence);
+        // honor-VERIFIED (mirrors control coverage at `control_coverage`): when the
+        // cli supplied an `EvidenceVerdict`, the artifact counts ONLY if it RESOLVES
+        // (a `file` exists / a `url` is well-formed) — a named-but-missing artifact
+        // is no better than a note. Absent from the index ⇒ fall back to kind-only
+        // (the v0 / domain-unit-test path).
+        let has_verifying = match process_evidence_index.get(pid) {
+            Some(v) => *v == EvidenceVerdict::Verified,
+            None => crate::model::has_verifying_evidence(&p.evidence),
+        };
         let open_incident = store
             .incidents
             .values()
@@ -906,7 +934,7 @@ mod tests {
                 reason: "missing or not a regular file".into(),
             },
         );
-        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, &BTreeMap::new(), None);
         assert_eq!(
             r.control_coverage.implemented_with_evidence, 0,
             "a missing file is not evidence (FALSE-PASS guard)"
@@ -954,7 +982,7 @@ mod tests {
                 reason: "malformed url".into(),
             },
         );
-        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, &BTreeMap::new(), None);
         assert_eq!(r.control_coverage.implemented_with_evidence, 0);
         assert!(
             r.gap_findings
@@ -968,7 +996,7 @@ mod tests {
         let mut s = base();
         implemented_control_with_file(&mut s, "c1", "real.pdf");
         let idx = evidence_index("c1", EvidenceVerdict::Verified);
-        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, None);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &idx, &BTreeMap::new(), None);
         assert_eq!(r.control_coverage.implemented_with_evidence, 1);
         assert!(
             !r.gap_findings
@@ -984,7 +1012,14 @@ mod tests {
         // a `file` evidence proves by KIND (no fs in domain), exactly as before.
         let mut s = base();
         implemented_control_with_file(&mut s, "c1", "report.json");
-        let r = readiness_with(&s, None, &BTreeMap::new(), &BTreeMap::new(), None);
+        let r = readiness_with(
+            &s,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            None,
+        );
         assert_eq!(r.control_coverage.implemented_with_evidence, 1);
         assert!(
             !r.gap_findings
@@ -1012,7 +1047,7 @@ mod tests {
         index.insert("c1".to_string(), stale_src);
 
         // opt-in: no source-freshness bound ⇒ counts as covered (today's behavior).
-        let r0 = readiness_with(&s, None, &index, &BTreeMap::new(), None);
+        let r0 = readiness_with(&s, None, &index, &BTreeMap::new(), &BTreeMap::new(), None);
         assert_eq!(r0.control_coverage.implemented_with_evidence, 1);
         assert!(
             !r0.gap_findings.iter().any(|g| g.kind == "ref_source_stale"),
@@ -1020,7 +1055,14 @@ mod tests {
         );
 
         // bound 600 < 1000 age ⇒ stale-by-source: not fresh coverage, a finding.
-        let r = readiness_with(&s, None, &index, &BTreeMap::new(), Some(600));
+        let r = readiness_with(
+            &s,
+            None,
+            &index,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(600),
+        );
         assert_eq!(
             r.control_coverage.implemented_with_evidence, 0,
             "a stale source is not fresh coverage"
@@ -1056,7 +1098,14 @@ mod tests {
         let mut index = BTreeMap::new();
         index.insert("c1".to_string(), failing_and_old);
 
-        let r = readiness_with(&s, None, &index, &BTreeMap::new(), Some(600));
+        let r = readiness_with(
+            &s,
+            None,
+            &index,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            Some(600),
+        );
         assert!(
             r.gap_findings.iter().any(|g| g.kind == "ref_failing"),
             "a failing source is a ref_failing gap"
@@ -1093,6 +1142,66 @@ mod tests {
         )
         .unwrap();
         assert!(readiness(&s, None).proven.contains(&"p1".to_string()));
+    }
+
+    /// honor-VERIFIED for the proven/asserted split (SC-1): a process's verifying
+    /// artifact counts toward `proven` only when it RESOLVES. With a
+    /// `process_evidence_index` injected, an `Unresolved` verdict (missing file /
+    /// malformed url) is `asserted` not `proven` (THE false-pass guard); a
+    /// `Verified` verdict is `proven`; a `NoteOnly` verdict is `asserted` (b1).
+    #[test]
+    fn proven_requires_resolving_evidence() {
+        let mut s = base();
+        s.set_process_status("p1", ProcessStatus::Active).unwrap();
+        // A verifying-KIND artifact is attached, but its honest verdict is injected
+        // via the process evidence index (the cli's fs oracle in production).
+        s.attach_process_evidence(
+            "p1",
+            Evidence {
+                kind: EvidenceKind::File,
+                value: "does-not-exist.pdf".into(),
+            },
+        )
+        .unwrap();
+
+        // Unresolved (missing file) ⇒ asserted, NOT proven (false-pass guard).
+        let mut pidx = BTreeMap::new();
+        pidx.insert(
+            "p1".to_string(),
+            EvidenceVerdict::Unresolved {
+                kind: EvidenceKind::File,
+                value: "does-not-exist.pdf".into(),
+                reason: "missing".into(),
+            },
+        );
+        let r = readiness_with(&s, None, &BTreeMap::new(), &BTreeMap::new(), &pidx, None);
+        assert!(
+            r.asserted.contains(&"p1".to_string()),
+            "unresolved process evidence ⇒ asserted"
+        );
+        assert!(
+            !r.proven.contains(&"p1".to_string()),
+            "a missing-file process must NOT be proven (false-green caught)"
+        );
+
+        // Verified (resolves) ⇒ proven.
+        let mut pidx = BTreeMap::new();
+        pidx.insert("p1".to_string(), EvidenceVerdict::Verified);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &BTreeMap::new(), &pidx, None);
+        assert!(
+            r.proven.contains(&"p1".to_string()),
+            "a resolving verifying artifact ⇒ proven"
+        );
+
+        // NoteOnly ⇒ asserted (b1 invariant).
+        let mut pidx = BTreeMap::new();
+        pidx.insert("p1".to_string(), EvidenceVerdict::NoteOnly);
+        let r = readiness_with(&s, None, &BTreeMap::new(), &BTreeMap::new(), &pidx, None);
+        assert!(
+            r.asserted.contains(&"p1".to_string()),
+            "note-only process evidence ⇒ asserted (b1)"
+        );
+        assert!(!r.proven.contains(&"p1".to_string()));
     }
 
     #[test]

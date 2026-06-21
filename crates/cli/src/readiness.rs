@@ -149,6 +149,7 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         args.process.as_deref(),
         &index,
         &evidence_index,
+        &BTreeMap::new(),
         store::source_freshness_secs(),
     );
     let next = if result.verdict == "READY" {
