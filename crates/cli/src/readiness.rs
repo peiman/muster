@@ -61,12 +61,37 @@ impl fmt::Display for ReadinessView<'_> {
 
 pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
     let dir = store::data_dir();
-    let mut s = store::load(&dir)?;
+    let s = store::load(&dir)?;
     // Honest not-found if scoping to a process that doesn't exist.
     if let Some(pid) = &args.process {
         s.process(pid)?;
     }
 
+    // SSOT: the index-build + readiness compute + view render is shared with
+    // `apply --dry-run` (which previews the would-be verdict over an in-memory
+    // merged store) via `render_for_store`. The ready/not-ready decision returned
+    // here drives BOTH the `next` hint (inside the renderer) and the gate below.
+    let is_ready = render_for_store(s, args.process.as_deref(), output, "readiness")?;
+    let outcome = if args.require_ready && !is_ready {
+        crate::Outcome::GateNotMet
+    } else {
+        crate::Outcome::Ok
+    };
+    Ok(outcome)
+}
+
+/// Render the readiness view for an in-memory `Store` and return whether it is
+/// READY. The cli owns the clock + resolution (#8): it projects every control to
+/// its honest `Derived` state and bakes ref-backed check results to their derived
+/// outcome, then hands both to the pure `domain::readiness_with`. Shared by
+/// `readiness::execute` (over the loaded store) and `apply --dry-run` (over the
+/// would-be merged store) so the verdict is computed in exactly ONE place (#7).
+pub(crate) fn render_for_store(
+    mut s: domain::Store,
+    process: Option<&str>,
+    output: &Output,
+    command: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
     let now = store::now_iso();
     let fresh = store::freshness_secs();
     let cmd_cache = store::cmd_cache_enabled();
@@ -159,14 +184,15 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
 
     let result = domain::readiness_with(
         &s,
-        args.process.as_deref(),
+        process,
         &index,
         &evidence_index,
         &process_evidence_index,
         store::source_freshness_secs(),
     );
     // SSOT: the ready/not-ready decision lives in `Readiness::is_ready()` (domain),
-    // reused here by BOTH the `next` hint and the `--require-ready` gate below.
+    // reused here by BOTH the `next` hint and (via the returned bool) the caller's
+    // `--require-ready` gate.
     let next = if result.is_ready() {
         "you are certification-ready — keep evidence fresh".to_string()
     } else {
@@ -178,15 +204,8 @@ pub fn execute(args: ReadinessArgs, output: &Output) -> Boxed {
         cmd_cache_mode: cmd_cache,
     };
     let view = WithNext::new(&readiness_view, next);
-    // Render FIRST, gate SECOND: the full readiness output (human or JSON) is always
-    // emitted regardless of the gate outcome — the exit code and the rendered output
-    // are independent channels. A gate miss is a SUCCESSFUL computation that did not
-    // meet the bar, never an error envelope.
-    output.success("readiness", &view, &mut io::stdout())?;
-    let outcome = if args.require_ready && !result.is_ready() {
-        crate::Outcome::GateNotMet
-    } else {
-        crate::Outcome::Ok
-    };
-    Ok(outcome)
+    // The full readiness output (human or JSON) is always emitted; the caller maps
+    // the returned readiness to an exit code (the gate is the caller's policy).
+    output.success(command, &view, &mut io::stdout())?;
+    Ok(result.is_ready())
 }
