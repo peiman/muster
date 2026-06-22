@@ -305,6 +305,65 @@ fn apply_accepts_a_bare_document_without_the_envelope() {
         .success();
 }
 
+#[test]
+fn apply_refuses_a_future_schema_version_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // Bump the version past what the binary understands (string-replace, exact shape).
+    let future = tmp.path().join("future.json");
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    fs::write(
+        &future,
+        s1_str.replace("\"schema_version\": 1", "\"schema_version\": 999"),
+    )
+    .unwrap();
+
+    let out = muster(&d)
+        .args(["apply", future.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply of a future schema_version must fail-closed"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("schema_version") || err.contains("version"),
+        "error must mention the schema version: {err}"
+    );
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused future-version apply mutated the store"
+    );
+}
+
+#[test]
+fn apply_accepts_an_unversioned_manifest_as_v1() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    // A legacy manifest that omits schema_version is accepted (defaults to v1).
+    let legacy = tmp.path().join("legacy.json");
+    fs::write(&legacy, r#"{"processes":[{"id":"p1","name":"P1","status":"proposed"}]}"#).unwrap();
+    muster(&d)
+        .args(["apply", legacy.to_str().unwrap()])
+        .assert()
+        .success();
+    let doc = data(&d, &["state"]);
+    assert_eq!(doc["processes"][0]["id"], "p1");
+    assert_eq!(doc["schema_version"], 1);
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]

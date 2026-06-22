@@ -80,6 +80,16 @@ pub fn execute(args: ApplyArgs, output: &Output) -> Boxed {
         )
     })?;
 
+    // Forward-protection (#7): refuse a manifest from a newer binary rather than
+    // silently misparsing it. An unversioned manifest defaults to v1 (accepted).
+    if doc.schema_version > domain::SCHEMA_VERSION {
+        return Err(format!(
+            "refusing to apply: manifest '{}' has schema_version {} but this muster understands up to {} — upgrade muster, then retry; the store was left unchanged.",
+            args.manifest, doc.schema_version, domain::SCHEMA_VERSION
+        )
+        .into());
+    }
+
     // 2. Build the merged would-be store in memory (no disk writes yet). `apply`
     //    requires an initialized store (honest error otherwise).
     let mut merged = store::load(&dir)?;
