@@ -96,6 +96,14 @@ const INTENTS: &[(&str, &str)] = &[
         "muster process revise <id> \"<what changed>\" --because <signal-id>",
     ),
     ("See where you stand", "muster readiness"),
+    (
+        "Read the whole store as one document",
+        "muster state --output json",
+    ),
+    (
+        "Author/update the whole store from a manifest (the declarative round-trip)",
+        "muster apply <manifest>  (preview with --dry-run)",
+    ),
 ];
 
 impl fmt::Display for Explain {

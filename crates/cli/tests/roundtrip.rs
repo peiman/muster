@@ -293,3 +293,33 @@ fn apply_accepts_a_bare_document_without_the_envelope() {
         .assert()
         .success();
 }
+
+// ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
+
+#[test]
+fn catalog_json_lists_state_and_apply() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let cat = data(&d, &["catalog"]);
+    let names: Vec<&str> = cat["commands"]
+        .as_array()
+        .expect("commands is an array")
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"state"), "catalog omits 'state': {names:?}");
+    assert!(names.contains(&"apply"), "catalog omits 'apply': {names:?}");
+}
+
+#[test]
+fn explain_lists_state_and_apply() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let out = muster(&d).arg("explain").output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("muster state"), "explain omits 'state'");
+    assert!(text.contains("muster apply"), "explain omits 'apply'");
+}
