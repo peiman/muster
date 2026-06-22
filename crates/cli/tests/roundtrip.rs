@@ -354,7 +354,11 @@ fn apply_accepts_an_unversioned_manifest_as_v1() {
 
     // A legacy manifest that omits schema_version is accepted (defaults to v1).
     let legacy = tmp.path().join("legacy.json");
-    fs::write(&legacy, r#"{"processes":[{"id":"p1","name":"P1","status":"proposed"}]}"#).unwrap();
+    fs::write(
+        &legacy,
+        r#"{"processes":[{"id":"p1","name":"P1","status":"proposed"}]}"#,
+    )
+    .unwrap();
     muster(&d)
         .args(["apply", legacy.to_str().unwrap()])
         .assert()
@@ -422,7 +426,10 @@ fn apply_refuses_a_duplicate_id_leaving_store_unchanged() {
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
-    assert!(err.contains("c1"), "error must name the duplicate id: {err}");
+    assert!(
+        err.contains("c1"),
+        "error must name the duplicate id: {err}"
+    );
     assert_eq!(
         raw_json(&d, &["state"]),
         s1,
@@ -443,9 +450,16 @@ fn apply_refuses_an_invalid_slug_id_leaving_store_unchanged() {
         r#"{"controls":[{"id":"Bad Id","title":"C","applicable":true,"status":"not_started","evidence":[]}]}"#,
     )
     .unwrap();
-    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "invalid-slug apply must fail-closed");
-    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused apply mutated the store"
+    );
 }
 
 #[test]
@@ -462,7 +476,10 @@ fn apply_refuses_a_dangling_intra_document_ref_leaving_store_unchanged() {
         r#"{"processes":[{"id":"p1","name":"P","status":"proposed","controls":["ghost"]}]}"#,
     )
     .unwrap();
-    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(
         !out.status.success(),
         "dangling intra-doc ref apply must fail-closed"
@@ -472,8 +489,15 @@ fn apply_refuses_a_dangling_intra_document_ref_leaving_store_unchanged() {
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
-    assert!(err.contains("ghost"), "error must name the dangling id: {err}");
-    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+    assert!(
+        err.contains("ghost"),
+        "error must name the dangling id: {err}"
+    );
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused apply mutated the store"
+    );
 }
 
 #[test]
@@ -519,14 +543,21 @@ fn apply_malformed_json_reports_the_not_valid_json_message() {
 
     let bad = tmp.path().join("malformed.json");
     fs::write(&bad, "{ this is not json").unwrap();
-    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "malformed JSON must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         err.contains("not valid JSON"),
         "malformed JSON must report the not-valid-JSON message: {err}"
     );
-    assert_eq!(raw_json(&d, &["state"]), s1, "a failed apply mutated the store");
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a failed apply mutated the store"
+    );
 }
 
 #[test]
@@ -538,7 +569,10 @@ fn apply_wrong_shape_reports_the_store_shape_message() {
     // Valid JSON, wrong shape (controls must be an array, not a number).
     let bad = tmp.path().join("wrongshape.json");
     fs::write(&bad, r#"{"controls": 5}"#).unwrap();
-    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "wrong-shape manifest must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -553,7 +587,10 @@ fn apply_missing_file_reports_the_read_error() {
     let d = data_dir(&tmp);
     init(&d);
     let missing = tmp.path().join("does-not-exist.json");
-    let out = muster(&d).args(["apply", missing.to_str().unwrap()]).output().unwrap();
+    let out = muster(&d)
+        .args(["apply", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "a missing manifest must fail");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -575,7 +612,10 @@ fn apply_empty_object_manifest_is_accepted_and_changes_nothing() {
 
     let empty = tmp.path().join("empty.json");
     fs::write(&empty, "{}").unwrap();
-    muster(&d).args(["apply", empty.to_str().unwrap()]).assert().success();
+    muster(&d)
+        .args(["apply", empty.to_str().unwrap()])
+        .assert()
+        .success();
     assert_eq!(
         raw_json(&d, &["state"]),
         s1,
@@ -592,7 +632,11 @@ fn raw_state_cc(dir: &Path) -> Vec<u8> {
         .args(["state", "--output", "json"])
         .output()
         .unwrap();
-    assert!(out.status.success(), "state failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "state failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     out.stdout
 }
 
@@ -601,7 +645,17 @@ fn seed_cmd_ref(dir: &Path) {
     init(dir);
     muster(dir)
         .env("MUSTER_CMD_CACHE", "1")
-        .args(["control", "add", "cmd-ctrl", "--title", "cmd", "--ref-cmd", "true", "--ref-dir", "."])
+        .args([
+            "control",
+            "add",
+            "cmd-ctrl",
+            "--title",
+            "cmd",
+            "--ref-cmd",
+            "true",
+            "--ref-dir",
+            ".",
+        ])
         .assert()
         .success();
     muster(dir)
@@ -619,7 +673,10 @@ fn apply_round_trip_preserves_a_resolved_timestamp() {
 
     let s1 = raw_state_cc(&d);
     let s1_str = String::from_utf8(s1.clone()).unwrap();
-    assert!(s1_str.contains("resolved_ts"), "seed must carry a resolved_ts: {s1_str}");
+    assert!(
+        s1_str.contains("resolved_ts"),
+        "seed must carry a resolved_ts: {s1_str}"
+    );
     let manifest = tmp.path().join("s1.json");
     fs::write(&manifest, &s1).unwrap();
 
@@ -648,7 +705,11 @@ fn apply_dry_run_preserves_a_resolved_timestamp() {
     // A changed-but-valid manifest (free-text title only): would change the store.
     let changed = tmp.path().join("changed.json");
     let s1_str = String::from_utf8(s1.clone()).unwrap();
-    fs::write(&changed, s1_str.replace("\"title\": \"cmd\"", "\"title\": \"CMD-CHANGED\"")).unwrap();
+    fs::write(
+        &changed,
+        s1_str.replace("\"title\": \"cmd\"", "\"title\": \"CMD-CHANGED\""),
+    )
+    .unwrap();
 
     muster(&d)
         .env("MUSTER_CMD_CACHE", "1")
@@ -669,22 +730,45 @@ fn apply_round_trip_preserves_multi_entity_ordering() {
     init(&d);
     // Insert OUT of id order to prove ordering survives the disk round-trip.
     for (id, name) in [("zeta", "Zeta"), ("alpha", "Alpha")] {
-        muster(&d).args(["process", "add", id, "--name", name]).assert().success();
+        muster(&d)
+            .args(["process", "add", id, "--name", name])
+            .assert()
+            .success();
     }
     for (id, title) in [("ctrl-b", "B"), ("ctrl-a", "A")] {
-        muster(&d).args(["control", "add", id, "--title", title]).assert().success();
+        muster(&d)
+            .args(["control", "add", id, "--title", title])
+            .assert()
+            .success();
     }
 
     let (manifest, s1) = capture_state(&d, &tmp, "s1.json");
     fs::remove_dir_all(&d).unwrap();
     init(&d);
-    muster(&d).args(["apply", manifest.to_str().unwrap()]).assert().success();
-    assert_eq!(raw_json(&d, &["state"]), s1, "ordering did not survive the round-trip");
+    muster(&d)
+        .args(["apply", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "ordering did not survive the round-trip"
+    );
 
     // And the output is id-sorted (deterministic).
     let doc = data(&d, &["state"]);
-    let pids: Vec<&str> = doc["processes"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-    let cids: Vec<&str> = doc["controls"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    let pids: Vec<&str> = doc["processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    let cids: Vec<&str> = doc["controls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
     assert_eq!(pids, vec!["alpha", "zeta"], "processes must be id-sorted");
     assert_eq!(cids, vec!["ctrl-a", "ctrl-b"], "controls must be id-sorted");
 }
@@ -698,11 +782,37 @@ fn apply_fail_closed_names_only_the_broken_control() {
     let fix = tmp.path().join("cov.json");
     fs::write(&fix, "{\"coverage\": {\"percent\": 92, \"other\": 50}}\n").unwrap();
     muster(&d)
-        .args(["control", "add", "cov-a", "--title", "A", "--ref-file", fix.to_str().unwrap(), "--ref-anchor", "coverage.percent", "--expect", ">=80"])
-        .assert().success();
+        .args([
+            "control",
+            "add",
+            "cov-a",
+            "--title",
+            "A",
+            "--ref-file",
+            fix.to_str().unwrap(),
+            "--ref-anchor",
+            "coverage.percent",
+            "--expect",
+            ">=80",
+        ])
+        .assert()
+        .success();
     muster(&d)
-        .args(["control", "add", "cov-b", "--title", "B", "--ref-file", fix.to_str().unwrap(), "--ref-anchor", "coverage.other", "--expect", ">=10"])
-        .assert().success();
+        .args([
+            "control",
+            "add",
+            "cov-b",
+            "--title",
+            "B",
+            "--ref-file",
+            fix.to_str().unwrap(),
+            "--ref-anchor",
+            "coverage.other",
+            "--expect",
+            ">=10",
+        ])
+        .assert()
+        .success();
     let (_m, s1) = capture_state(&d, &tmp, "s1.json");
 
     // Break ONLY cov-b's anchor (cov-a stays healthy).
@@ -710,16 +820,32 @@ fn apply_fail_closed_names_only_the_broken_control() {
     let s1_str = String::from_utf8(s1.clone()).unwrap();
     fs::write(&bad, s1_str.replace("coverage.other", "coverage.MISSING")).unwrap();
 
-    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
-    assert!(!out.status.success(), "apply with a broken anchor must fail-closed");
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply with a broken anchor must fail-closed"
+    );
     let err = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
-    assert!(err.contains("cov-b"), "error must name the broken control: {err}");
-    assert!(!err.contains("cov-a"), "error must NOT name the healthy control: {err}");
-    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+    assert!(
+        err.contains("cov-b"),
+        "error must name the broken control: {err}"
+    );
+    assert!(
+        !err.contains("cov-a"),
+        "error must NOT name the healthy control: {err}"
+    );
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused apply mutated the store"
+    );
 }
 
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────

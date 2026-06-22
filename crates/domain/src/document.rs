@@ -70,10 +70,6 @@ impl From<&Store> for StoreDocument {
 }
 
 impl StoreDocument {
-    /// Merge this document into a store (the `apply` direction): create-or-replace
-    /// every entity by id (UPSERT). v3 does NOT prune entities absent from the
-    /// document — `apply` is additive, which keeps the round-trip exact. Pure: it
-    /// does only the structural merge; ref validation is the cli's job (#8).
     /// Domain-pure trust-boundary validation of the manifest against the `merged`
     /// (manifest ∪ existing store) result — the structural sibling of the cli's
     /// `validate_store_refs` (which does live ref I/O). Fail-closed, naming the
@@ -121,6 +117,10 @@ impl StoreDocument {
         Ok(())
     }
 
+    /// Merge this document into a store (the `apply` direction): create-or-replace
+    /// every entity by id (UPSERT). v3 does NOT prune entities absent from the
+    /// document — `apply` is additive, which keeps the round-trip exact. Pure: it
+    /// does only the structural merge; ref validation is the cli's job (#8).
     pub fn upsert_into(&self, store: &mut Store) {
         for p in &self.processes {
             store.processes.insert(p.id.clone(), p.clone());
@@ -159,27 +159,39 @@ fn check_ids<'a>(
 
 /// Refuse a dangling intra-document control reference, naming both the dangling
 /// control id and the referring entity (so the offender is unambiguous, #1).
-fn require_control(merged: &Store, id: &str, referrer: std::fmt::Arguments) -> Result<(), DomainError> {
+fn require_control(
+    merged: &Store,
+    id: &str,
+    referrer: std::fmt::Arguments,
+) -> Result<(), DomainError> {
     if merged.controls.contains_key(id) {
         Ok(())
     } else {
         Err(DomainError::mref(
             "control",
             id,
-            format!("referenced by {referrer} but present in neither the manifest nor the store — add the control or remove the reference"),
+            format!(
+                "referenced by {referrer} but present in neither the manifest nor the store — add the control or remove the reference"
+            ),
         ))
     }
 }
 
 /// Refuse a dangling intra-document process reference (mirror of [`require_control`]).
-fn require_process(merged: &Store, id: &str, referrer: std::fmt::Arguments) -> Result<(), DomainError> {
+fn require_process(
+    merged: &Store,
+    id: &str,
+    referrer: std::fmt::Arguments,
+) -> Result<(), DomainError> {
     if merged.processes.contains_key(id) {
         Ok(())
     } else {
         Err(DomainError::mref(
             "process",
             id,
-            format!("referenced by {referrer} but present in neither the manifest nor the store — add the process or remove the reference"),
+            format!(
+                "referenced by {referrer} but present in neither the manifest nor the store — add the process or remove the reference"
+            ),
         ))
     }
 }
@@ -235,7 +247,8 @@ mod tests {
     fn validate_accepts_a_self_consistent_document() {
         let s = seeded();
         let doc = StoreDocument::from(&s);
-        doc.validate(&s).expect("a self-consistent document validates");
+        doc.validate(&s)
+            .expect("a self-consistent document validates");
     }
 
     #[test]
@@ -259,7 +272,10 @@ mod tests {
             controls: vec![doc_control("Bad Id")],
             ..StoreDocument::default()
         };
-        assert!(matches!(validate_self(&doc), Err(DomainError::InvalidSlug(_))));
+        assert!(matches!(
+            validate_self(&doc),
+            Err(DomainError::InvalidSlug(_))
+        ));
     }
 
     #[test]
@@ -296,7 +312,10 @@ mod tests {
         };
         assert!(matches!(
             validate_self(&doc),
-            Err(DomainError::MissingReference { kind: "process", .. })
+            Err(DomainError::MissingReference {
+                kind: "process",
+                ..
+            })
         ));
     }
 
