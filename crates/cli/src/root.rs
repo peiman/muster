@@ -148,6 +148,8 @@ pub enum Commands {
     Readiness(ReadinessArgs),
     /// Read the entire store as one declarative document (read-only)
     State,
+    /// Reconcile the store to a manifest — upsert, idempotent, fail-closed
+    Apply(ApplyArgs),
 
     /// Check connectivity — returns pong (framework worked example)
     Ping,
@@ -481,4 +483,18 @@ pub struct ReadinessArgs {
     /// error; 2 = CLI usage error (clap); 3 = gate not met.
     #[arg(long = "require-ready")]
     pub require_ready: bool,
+}
+
+// ── apply ────────────────────────────────────────────────────────────────────
+
+#[derive(Args, Debug)]
+pub struct ApplyArgs {
+    /// Path to the manifest — the document `muster state --output json` emits
+    /// (the CKSPEC envelope or a bare store document). JSON is the authoritative
+    /// shape; the manifest IS the store shape (#7, one schema in and out).
+    pub manifest: String,
+    /// Compute and print the would-be readiness verdict WITHOUT mutating the
+    /// store — an enforced preview, not advice (#9).
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
 }

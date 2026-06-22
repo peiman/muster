@@ -1,6 +1,7 @@
 //! Entry point — bootstrap only (CKSPEC-ARCH-006).
 //! All logic lives in domain and infrastructure crates.
 
+mod apply;
 mod catalog;
 mod control;
 mod explain;
@@ -224,6 +225,7 @@ fn subcommand_name(command: &root::Commands) -> &'static str {
         root::Commands::Nonconformity(_) => "nonconformity",
         root::Commands::Readiness(_) => "readiness",
         root::Commands::State => "state",
+        root::Commands::Apply(_) => "apply",
         root::Commands::Ping => "ping",
         root::Commands::Version => "version",
         root::Commands::Catalog => "catalog",
@@ -346,6 +348,7 @@ fn run_inner(cli: root::Cli) -> Result<(LogGuard, i32), RunError> {
         }
         root::Commands::Readiness(a) => readiness::execute(a, &output),
         root::Commands::State => state::execute(&output).map(|()| Outcome::Ok),
+        root::Commands::Apply(a) => apply::execute(a, &output).map(|()| Outcome::Ok),
         root::Commands::Ping => ping::execute(&output)
             .map(|()| Outcome::Ok)
             .map_err(|e| Box::new(e) as _),

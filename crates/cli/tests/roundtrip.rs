@@ -150,3 +150,146 @@ fn state_human_mode_mirrors_the_same_ids() {
     );
     assert!(text.contains("cov-bar"), "human state missing control");
 }
+
+// ── SC-3 / SC-4 / SC-5 / SC-6 — apply ─────────────────────────────────────────
+
+/// Capture `state --output json` to a file, returning its path + bytes.
+fn capture_state(dir: &Path, tmp: &TempDir, name: &str) -> (PathBuf, Vec<u8>) {
+    let bytes = raw_json(dir, &["state"]);
+    let path = tmp.path().join(name);
+    fs::write(&path, &bytes).unwrap();
+    (path, bytes)
+}
+
+#[test]
+fn apply_round_trip_is_a_fixpoint() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+
+    // Capture the literal envelope bytes `state` emits.
+    let (manifest, s1) = capture_state(&d, &tmp, "s1.json");
+    // Wipe the data dir, re-init, and apply the captured document.
+    fs::remove_dir_all(&d).unwrap();
+    init(&d);
+    muster(&d)
+        .args(["apply", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+    let s2 = raw_json(&d, &["state"]);
+    assert_eq!(
+        s1, s2,
+        "round-trip is not a fixpoint: state != apply(state)"
+    );
+}
+
+#[test]
+fn apply_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (manifest, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // Apply twice over the existing store; both leave it byte-identical.
+    for _ in 0..2 {
+        muster(&d)
+            .args(["apply", manifest.to_str().unwrap()])
+            .assert()
+            .success();
+    }
+    assert_eq!(raw_json(&d, &["state"]), s1, "apply is not idempotent");
+}
+
+#[test]
+fn apply_dry_run_mutates_nothing_but_prints_verdict() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // A VALID-but-changed manifest (free-text only): would change the store.
+    let changed = tmp.path().join("changed.json");
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    fs::write(
+        &changed,
+        s1_str.replace("Ship the round-trip", "MUTATED-by-dry-run"),
+    )
+    .unwrap();
+
+    let out = muster(&d)
+        .args(["apply", "--dry-run", changed.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "dry-run must exit 0");
+    let printed = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    assert!(
+        printed.contains("ready") || printed.contains("gaps") || printed.contains("verdict"),
+        "dry-run did not print a readiness verdict: {printed}"
+    );
+    // The store is untouched by the dry-run.
+    assert_eq!(raw_json(&d, &["state"]), s1, "--dry-run mutated the store");
+}
+
+#[test]
+fn apply_fails_closed_on_dangling_anchor_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // Break ONLY the anchor string (keep the exact serde shape).
+    let bad = tmp.path().join("bad.json");
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    fs::write(
+        &bad,
+        s1_str.replace("coverage.percent", "coverage.DOES_NOT_EXIST"),
+    )
+    .unwrap();
+
+    let out = muster(&d)
+        .args(["apply", bad.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply of a dangling-anchor manifest must fail-closed"
+    );
+    // The error names the offending control and is honest about no mutation.
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("cov-bar"),
+        "error must name the control: {err}"
+    );
+    // The store was left exactly as it was (all-or-nothing).
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a failed apply mutated the store (not all-or-nothing)"
+    );
+}
+
+#[test]
+fn apply_accepts_a_bare_document_without_the_envelope() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+
+    // Extract just the `data` (a bare StoreDocument) and apply it — accepted too.
+    let envelope: Value = serde_json::from_slice(&raw_json(&d, &["state"])).unwrap();
+    let bare = tmp.path().join("bare.json");
+    fs::write(&bare, serde_json::to_vec(&envelope["data"]).unwrap()).unwrap();
+
+    muster(&d)
+        .args(["apply", bare.to_str().unwrap()])
+        .assert()
+        .success();
+}

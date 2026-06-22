@@ -203,6 +203,56 @@ fn derived_from(
     }
 }
 
+/// Fail-closed ref validation for the whole store (#9), shared by `apply`. Every
+/// `file_anchor` / `command` ref — on each control, each implementation, and each
+/// ref-backed check — is resolved LIVE; an `Unresolved` (dangling anchor / missing
+/// file / spawn failure / malformed shape) refuses the WHOLE manifest, naming the
+/// offending entity id and the fix. A `command` ref's non-zero *exit* is a
+/// legitimate fail, not an apply error — only an outright `Unresolved` refuses.
+/// Returning `Err` BEFORE the caller persists makes a refused apply structurally
+/// all-or-nothing: the on-disk store is never half-written.
+pub fn validate_store_refs(s: &domain::Store) -> Result<(), String> {
+    let now = store::now_iso();
+    for c in s.controls.values() {
+        if let Some(r) = &c.r#ref {
+            validate_one(r, "control", &c.id, &now)?;
+        }
+        for im in &c.implementations {
+            validate_one(&im.r#ref, "control implementation", &im.id, &now)?;
+        }
+    }
+    for p in s.processes.values() {
+        for check in &p.checks {
+            if let Some(r) = &check.r#ref {
+                validate_one(r, "check", &check.id, &now)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse one entity's ref if it does not resolve. Notes / no-ref always pass.
+fn validate_one(r: &Ref, kind: &str, id: &str, now: &str) -> Result<(), String> {
+    match r {
+        Ref::FileAnchor { path, anchor, .. } => {
+            if let Resolution::Unresolved { reason } = resolve(r, now) {
+                return Err(format!(
+                    "refusing to apply: {kind} '{id}' has a file_anchor that does not resolve — {reason} (anchor '{anchor}' in '{path}'). Fix the source file or the anchor, then retry; the store was left unchanged."
+                ));
+            }
+        }
+        Ref::Command { cmd, .. } => {
+            if let Resolution::Unresolved { reason } = resolve(r, now) {
+                return Err(format!(
+                    "refusing to apply: {kind} '{id}' has a command ref that could not run — {reason} (command '{cmd}'). Fix the command or its dir, then retry; the store was left unchanged."
+                ));
+            }
+        }
+        Ref::Note { .. } => {}
+    }
+    Ok(())
+}
+
 /// A served (cached) resolution is stale when `freshness_secs == 0` (the
 /// deterministic hook — never trust a cache) or when its age exceeds the bound.
 fn is_stale_now(resolved_ts: &str, now_iso: &str, freshness_secs: i64) -> bool {
