@@ -349,6 +349,64 @@ mod tests {
         assert!(parse_iso_to_epoch("2022-01-01 00:00:00").is_none());
     }
 
+    /// The atomic-save anchor (#3 all-or-nothing, #9 enforced not honor-system):
+    /// a `save` that FAILS mid-write must not tear or half-write an entity that
+    /// already exists on disk. We force a phase-1 staging failure by pre-creating
+    /// `<id>.json.tmp` as a *directory* (so the temp `std::fs::write` errors), then
+    /// attempt to overwrite the live entity with new content. Under temp-then-rename
+    /// the live `<id>.json` is never touched (this test is GREEN); under a non-atomic
+    /// direct write the live file is clobbered before the failure surfaces (RED) — so
+    /// this is the genuine guard the `*.tmp`-leftover test could not provide.
+    #[test]
+    fn a_failed_save_leaves_a_preexisting_entity_byte_unchanged() {
+        use domain::{Control, ControlStatus};
+        use tempfile::TempDir;
+
+        let mk = |title: &str| {
+            let mut store = Store::default();
+            store.controls.insert(
+                "c-one".to_string(),
+                Control {
+                    id: "c-one".to_string(),
+                    title: title.to_string(),
+                    clause_ref: None,
+                    applicable: true,
+                    status: ControlStatus::NotStarted,
+                    evidence: vec![],
+                    r#ref: None,
+                    resolved: None,
+                    implementations: vec![],
+                },
+            );
+            store
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        init(dir).expect("init store layout");
+
+        // 1. Persist the entity with its original content.
+        save(dir, &mk("original")).expect("first save succeeds");
+        let live = dir.join("controls").join("c-one.json");
+        let original_bytes = std::fs::read(&live).expect("read original entity");
+
+        // 2. Block phase-1 staging for this id: a directory at `<id>.json.tmp` makes
+        //    the temp write fail before any live file could be renamed.
+        std::fs::create_dir(dir.join("controls").join("c-one.json.tmp")).expect("block tmp path");
+
+        // 3. Attempt to overwrite with NEW content — this must fail-closed.
+        let result = save(dir, &mk("MUTATED"));
+
+        // The anchor: the pre-existing live file is byte-for-byte unchanged.
+        assert_eq!(
+            std::fs::read(&live).expect("read entity after failed save"),
+            original_bytes,
+            "a failed save tore / half-wrote a pre-existing entity file"
+        );
+        // And the failure is honestly surfaced (not swallowed).
+        assert!(result.is_err(), "save must surface the staging failure");
+    }
+
     #[test]
     fn now_iso_is_rfc3339_shaped() {
         let ts = now_iso();
