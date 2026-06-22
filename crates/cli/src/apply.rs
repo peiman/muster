@@ -4,7 +4,8 @@
 //! it. UPSERT every entity by id (no prune, v3), IDEMPOTENT (a second apply is
 //! byte-identical), FAIL-CLOSED (a dangling-anchor / malformed manifest is refused
 //! as a WHOLE — the store is left exactly as it was), and `--dry-run` prints the
-//! would-be `readiness` verdict WITHOUT mutating. The manifest IS the store shape
+//! would-be `readiness` verdict WITHOUT mutating (and WITHOUT gating the exit
+//! code — `apply` uses 0/1 only). The manifest IS the store shape
 //! (#7); only this cli layer touches disk (#8); ref validation precedes the single
 //! writer, so a refused apply cannot half-write (#9).
 

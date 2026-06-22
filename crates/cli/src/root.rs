@@ -494,7 +494,9 @@ pub struct ApplyArgs {
     /// shape; the manifest IS the store shape (#7, one schema in and out).
     pub manifest: String,
     /// Compute and print the would-be readiness verdict WITHOUT mutating the
-    /// store — an enforced preview, not advice (#9).
+    /// store — an enforced preview, not advice (#9). It prints the verdict only;
+    /// it does NOT gate the exit code (`apply` uses 0/1 only — a dry-run that
+    /// previews an un-ready store still exits 0).
     #[arg(long = "dry-run")]
     pub dry_run: bool,
 }
