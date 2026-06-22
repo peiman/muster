@@ -3,12 +3,14 @@
 //!
 //! No I/O, no clap, no fs (Manifesto #8). The cli crate owns the disk boundary.
 
+pub mod document;
 pub mod model;
 pub mod ping;
 pub mod readiness;
 pub mod reference;
 pub mod store;
 
+pub use document::StoreDocument;
 pub use model::{
     Check, CheckResult, Control, ControlStatus, DomainError, Enforcement, Evidence, EvidenceKind,
     EvidenceVerdict, Implementation, Incident, IncidentStatus, LogEntry, Nonconformity,
