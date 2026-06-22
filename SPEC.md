@@ -52,10 +52,32 @@ Reconcile the store to a manifest in one operation:
   exact.
 - **Idempotent:** applying the same manifest twice leaves the store byte-identical
   (#10 — a re-run is not a change).
-- **Fail-closed (#9):** a manifest whose ref does not validate (a dangling
-  `file_anchor` anchor, a malformed shape) is **refused as a whole** — the store is left
-  exactly as it was, and the error names the offending entity and the fix. A partial
-  apply must never leave the store half-written.
+- **Fail-closed against the full input matrix (#9, #1).** `apply` is a new *trust
+  boundary*: a manifest is not a trusted dump, it is adversarial input. It is **refused
+  as a whole** — the store left exactly as it was, the error naming the offending entity
+  and the fix — when ANY of the following holds, mirroring every guard the interactive
+  mutators already enforce (a manifest must not be a back door around them):
+  - a typed `Ref` does not resolve (a dangling `file_anchor` anchor — already enforced);
+  - the JSON shape is malformed, or carries an **unknown field** (a misspelled key must
+    be an honest error, never a silent drop — `deny_unknown_fields`, so "what it reads it
+    can write back exactly" cannot quietly lose data);
+  - any entity **id is not a valid slug**, or a **duplicate id** appears within a
+    category (the interactive path rejects both; `apply` must too — last-write-wins is a
+    silent corruption);
+  - an **intra-document id reference** (`process_ref`, `control_ref`, `step.controls`,
+    `from_incident`) names an entity present in neither the manifest nor the store.
+  Validation runs over the whole *resulting* (merged) store and completes **before** any
+  write, so a refused manifest is structurally incapable of half-writing.
+- **All-or-nothing persistence (#3 — build the anchor, don't document the gap).** The
+  underlying store write itself is **atomic**: every entity is serialized to a temp file
+  first (any serialize/IO failure aborts before a single live file is touched), then the
+  temps are renamed into place — so a mid-write `ENOSPC`/interruption cannot tear a file
+  or leave a corrupt, unparseable store. (This hardens the shared `store::save`, so the
+  guarantee holds for every command, not just `apply` — #5 platforms.)
+- **Versioned (#7, forward-protection).** The document carries a `schema_version`
+  (reusing the store's existing `SCHEMA_VERSION`); `apply` refuses a manifest whose
+  version is newer than the binary understands rather than silently misparsing it, and an
+  unversioned legacy manifest defaults to v1.
 - **`--dry-run`:** compute and print what the store *would* become (and its resulting
   `readiness` verdict) **without mutating** anything. An agent can preview a goal-store's
   verdict before committing it.
@@ -89,15 +111,28 @@ a cold agent via `--output json`, **the black-box acceptance script
    ref-backed control emits a single document containing every entity (not a verdict
    view — the editable store).
 2. **Round-trip fixpoint:** capture `state` → wipe the data dir → `apply` the captured
-   document → `state` again → the two `state` outputs are **identical**.
+   document → `state` again → the two `state` outputs are **identical** — proven over a
+   store that includes a **time-derived field** (a `command`-ref under `MUSTER_CMD_CACHE`
+   carries a `resolved_ts`), so a regression that re-stamps or drops a timestamp on apply
+   is actually caught (a timestamp-free seed only half-tests the invariant).
 3. **Idempotent apply:** applying the same manifest twice yields a byte-identical store.
 4. **`--dry-run` mutates nothing:** `apply --dry-run` against a changed manifest leaves
-   `state` identical to before, while still printing the would-be `readiness` verdict.
-5. **Fail-closed:** `apply` of a manifest with a dangling `file_anchor` anchor exits
-   non-zero, names the offending control, and leaves the store **unchanged** (verified by
-   comparing `state` before and after).
+   `state` identical to before (proven for a `command`-ref/cache seed too, so a dry-run
+   cache-write regression is caught), while still printing the would-be `readiness`
+   verdict.
+5. **Fail-closed against the full matrix:** each of — a dangling `file_anchor` anchor, an
+   **unknown field**, an **invalid-slug or duplicate id**, a **dangling intra-document
+   ref** — makes `apply` exit non-zero, name the **offending** entity (and *not* a healthy
+   one), and leave the store **unchanged** (verified by comparing `state` before and
+   after). A two-entity case proves the error names the offender, not merely "some" id.
 6. **Discoverability:** `muster explain` and `muster catalog --output json` both list
    `state` and `apply`.
+7. **Atomic persistence:** a successful `apply` leaves no stray temp/staging files in the
+   data dir, and the round-trip stays byte-identical (the atomic write must not perturb
+   the bytes). The mechanism is write-temp-then-rename in the shared `store::save`.
+8. **Versioned:** `state` emits a `schema_version`; `apply` of a manifest whose version
+   exceeds the binary's is refused with an honest error (not a silent misparse); an
+   unversioned manifest is accepted as v1.
 
 (`acceptance/roundtrip.sh` is committed RED — it fails today because the commands do not
 exist. Making it pass is the goal; do not delete or weaken it. The loop's own idiomatic

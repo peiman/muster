@@ -88,4 +88,41 @@ CAT="$(m catalog --output json 2>&1)"
 echo "$CAT" | grep -q "state" || fail "(6) 'muster catalog' omits 'state'"
 echo "$CAT" | grep -q "apply" || fail "(6) 'muster catalog' omits 'apply'"
 
-echo "PASS: muster v3 declarative round-trip — all 6 acceptance criteria hold."
+# ── 7. Trust boundary — a DUPLICATE id within a category is refused as a whole; the
+#    store is left unchanged. `apply` is adversarial input, not a trusted dump: the
+#    interactive path rejects duplicate ids, so apply must too (last-write-wins is a
+#    silent corruption). Schema-agnostic: duplicate the first control object verbatim.
+DUP="$WORK/dup.json"
+python3 - "$S1" "$DUP" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+doc = d["data"] if isinstance(d.get("data"), dict) and "controls" in d["data"] else d
+ctrls = doc["controls"]
+assert isinstance(ctrls, list) and ctrls, "expected a non-empty controls array in state output"
+ctrls.append(json.loads(json.dumps(ctrls[0])))  # an exact-id duplicate
+json.dump(d, open(sys.argv[2], "w"))
+PY
+if "$BIN" apply "$DUP" >/dev/null 2>&1; then
+  fail "(7) apply of a duplicate-id manifest should fail-closed, but it succeeded"
+fi
+S7="$WORK/s7.json"; m state --output json > "$S7"
+diff "$S1" "$S7" >/dev/null || fail "(7) a refused duplicate-id apply mutated the store"
+
+# ── 8. Trust boundary — an UNKNOWN entity field is refused, never silently dropped
+#    (a misspelled key must be an honest error so "what it reads it can write back
+#    exactly" cannot quietly lose data). Inject a bogus field into a real entity.
+UNK="$WORK/unknown.json"
+python3 - "$S1" "$UNK" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+doc = d["data"] if isinstance(d.get("data"), dict) and "controls" in d["data"] else d
+doc["controls"][0]["bogus_unknown_field"] = True
+json.dump(d, open(sys.argv[2], "w"))
+PY
+if "$BIN" apply "$UNK" >/dev/null 2>&1; then
+  fail "(8) apply of an unknown-field manifest should fail-closed, but it succeeded"
+fi
+S8="$WORK/s8.json"; m state --output json > "$S8"
+diff "$S1" "$S8" >/dev/null || fail "(8) a refused unknown-field apply mutated the store"
+
+echo "PASS: muster v3 declarative round-trip — all 8 acceptance criteria hold."
