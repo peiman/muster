@@ -583,6 +583,145 @@ fn apply_empty_object_manifest_is_accepted_and_changes_nothing() {
     );
 }
 
+/// Raw `state --output json` bytes with command-cache mode on (so a command-ref
+/// seed carries a `resolved_ts` and the round-trip is exercised over a time-derived
+/// field — a re-stamp/drop-timestamp regression a timestamp-free seed would miss).
+fn raw_state_cc(dir: &Path) -> Vec<u8> {
+    let out = muster(dir)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["state", "--output", "json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "state failed: {}", String::from_utf8_lossy(&out.stderr));
+    out.stdout
+}
+
+/// Seed a command-ref control and resolve it so the store carries a `resolved_ts`.
+fn seed_cmd_ref(dir: &Path) {
+    init(dir);
+    muster(dir)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["control", "add", "cmd-ctrl", "--title", "cmd", "--ref-cmd", "true", "--ref-dir", "."])
+        .assert()
+        .success();
+    muster(dir)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["control", "resolve", "cmd-ctrl"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn apply_round_trip_preserves_a_resolved_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    seed_cmd_ref(&d);
+
+    let s1 = raw_state_cc(&d);
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    assert!(s1_str.contains("resolved_ts"), "seed must carry a resolved_ts: {s1_str}");
+    let manifest = tmp.path().join("s1.json");
+    fs::write(&manifest, &s1).unwrap();
+
+    // Wipe, re-init, apply — the resolved_ts must survive byte-identically.
+    fs::remove_dir_all(&d).unwrap();
+    init(&d);
+    muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["apply", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        raw_state_cc(&d),
+        s1,
+        "round-trip dropped or re-stamped the resolved timestamp"
+    );
+}
+
+#[test]
+fn apply_dry_run_preserves_a_resolved_timestamp() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    seed_cmd_ref(&d);
+    let s1 = raw_state_cc(&d);
+
+    // A changed-but-valid manifest (free-text title only): would change the store.
+    let changed = tmp.path().join("changed.json");
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    fs::write(&changed, s1_str.replace("\"title\": \"cmd\"", "\"title\": \"CMD-CHANGED\"")).unwrap();
+
+    muster(&d)
+        .env("MUSTER_CMD_CACHE", "1")
+        .args(["apply", "--dry-run", changed.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(
+        raw_state_cc(&d),
+        s1,
+        "--dry-run mutated the store (timestamp re-stamped or cache written)"
+    );
+}
+
+#[test]
+fn apply_round_trip_preserves_multi_entity_ordering() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // Insert OUT of id order to prove ordering survives the disk round-trip.
+    for (id, name) in [("zeta", "Zeta"), ("alpha", "Alpha")] {
+        muster(&d).args(["process", "add", id, "--name", name]).assert().success();
+    }
+    for (id, title) in [("ctrl-b", "B"), ("ctrl-a", "A")] {
+        muster(&d).args(["control", "add", id, "--title", title]).assert().success();
+    }
+
+    let (manifest, s1) = capture_state(&d, &tmp, "s1.json");
+    fs::remove_dir_all(&d).unwrap();
+    init(&d);
+    muster(&d).args(["apply", manifest.to_str().unwrap()]).assert().success();
+    assert_eq!(raw_json(&d, &["state"]), s1, "ordering did not survive the round-trip");
+
+    // And the output is id-sorted (deterministic).
+    let doc = data(&d, &["state"]);
+    let pids: Vec<&str> = doc["processes"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+    let cids: Vec<&str> = doc["controls"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(pids, vec!["alpha", "zeta"], "processes must be id-sorted");
+    assert_eq!(cids, vec!["ctrl-a", "ctrl-b"], "controls must be id-sorted");
+}
+
+#[test]
+fn apply_fail_closed_names_only_the_broken_control() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    // A fixture with two distinct anchors, so each control breaks independently.
+    let fix = tmp.path().join("cov.json");
+    fs::write(&fix, "{\"coverage\": {\"percent\": 92, \"other\": 50}}\n").unwrap();
+    muster(&d)
+        .args(["control", "add", "cov-a", "--title", "A", "--ref-file", fix.to_str().unwrap(), "--ref-anchor", "coverage.percent", "--expect", ">=80"])
+        .assert().success();
+    muster(&d)
+        .args(["control", "add", "cov-b", "--title", "B", "--ref-file", fix.to_str().unwrap(), "--ref-anchor", "coverage.other", "--expect", ">=10"])
+        .assert().success();
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // Break ONLY cov-b's anchor (cov-a stays healthy).
+    let bad = tmp.path().join("bad.json");
+    let s1_str = String::from_utf8(s1.clone()).unwrap();
+    fs::write(&bad, s1_str.replace("coverage.other", "coverage.MISSING")).unwrap();
+
+    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "apply with a broken anchor must fail-closed");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("cov-b"), "error must name the broken control: {err}");
+    assert!(!err.contains("cov-a"), "error must NOT name the healthy control: {err}");
+    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]
