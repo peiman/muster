@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **muster v3 — the declarative whole-store round-trip (`muster state` /
+  `muster apply`).** Two new verbs let an agent author and read the *entire*
+  store in one shot, replacing the N+1 per-entity command dance.
+  - **`muster state`** serializes the whole store (every process, control,
+    incident, nonconformity) to ONE declarative document. `--output json` is the
+    authoritative shape; human mode mirrors the same fields. Deterministic,
+    id-sorted, and structurally **read-only** (it never mutates or re-resolves
+    refs).
+  - **`muster apply <manifest>`** reconciles the store to that same shape:
+    **upsert** every entity by id (no prune in v3), **idempotent** (a second
+    apply is byte-identical), and **fail-closed** — a manifest with a dangling
+    `file_anchor` anchor or a malformed shape is refused as a WHOLE (ref
+    validation precedes the single writer, so the store is never half-written),
+    with the error naming the offending entity and the fix. `--dry-run` prints
+    the would-be `readiness` verdict WITHOUT mutating anything. Accepts both the
+    `state --output json` envelope and a bare document.
+  - The defining invariant is a **fixpoint**: `apply(state())` leaves the store
+    identical. One schema flows out (`state`) and in (`apply`) — the domain
+    `Store` is the single source (a new pure `domain::StoreDocument`); only the
+    cli layer touches disk.
 - **`muster readiness --require-ready` — a native CI gate.** Exits **3** when the
   (optionally `--process`-scoped) store is not READY, while still rendering the
   full readiness output (human or JSON) so the operator/agent sees *why*. Without

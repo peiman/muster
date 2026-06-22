@@ -69,7 +69,15 @@ muster control add a5-24 --title "Incident planning" --clause-ref "ISO 27001 A.5
 muster process link-control incident-mgmt a5-24
 muster readiness                              # the honest truth-meter
 muster explain                                # intent -> command map (no manual)
+
+muster state --output json > store.json       # read the WHOLE store, once
+muster apply store.json                        # author/update it back (round-trip)
+muster apply store.json --dry-run             # preview the would-be readiness verdict
 ```
+
+`state` and `apply` are inverses: `apply(state())` leaves the store identical (a
+fixpoint). `state` is read-only; `apply` is an idempotent, fail-closed upsert (a
+manifest with a dangling ref is refused as a whole, leaving the store unchanged).
 
 Every command supports `--output json` whose fields mirror the human text exactly
 (dual surface, one source of truth). Exit codes are honest; errors name the fix.
