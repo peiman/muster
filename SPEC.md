@@ -64,16 +64,21 @@ Reconcile the store to a manifest in one operation:
   - any entity **id is not a valid slug**, or a **duplicate id** appears within a
     category (the interactive path rejects both; `apply` must too — last-write-wins is a
     silent corruption);
-  - an **intra-document id reference** (`process_ref`, `control_ref`, `step.controls`,
-    `from_incident`) names an entity present in neither the manifest nor the store.
+  - an **intra-document id reference** (a process's `controls` / `step.process_ref` /
+    `step.controls`, an incident's or nonconformity's `process_ref`, a nonconformity's
+    `control_ref`) names an entity present in neither the manifest nor the store.
   Validation runs over the whole *resulting* (merged) store and completes **before** any
   write, so a refused manifest is structurally incapable of half-writing.
-- **All-or-nothing persistence (#3 — build the anchor, don't document the gap).** The
-  underlying store write itself is **atomic**: every entity is serialized to a temp file
-  first (any serialize/IO failure aborts before a single live file is touched), then the
-  temps are renamed into place — so a mid-write `ENOSPC`/interruption cannot tear a file
-  or leave a corrupt, unparseable store. (This hardens the shared `store::save`, so the
-  guarantee holds for every command, not just `apply` — #5 platforms.)
+- **Per-file-atomic persistence (#3 — build the anchor, don't document the gap).** The
+  store write is **temp-then-rename, not a cross-file transaction**: every entity is
+  serialized to a temp file first (any serialize/IO failure aborts before a single live
+  file is touched), then the temps are renamed into place — so a mid-write
+  `ENOSPC`/interruption cannot tear a file or leave a corrupt, *unparseable* store. A
+  crash *between* renames can still leave a partial **set** (some entities new, some old),
+  but never a torn file; whole-store crash-atomicity across the file set is deliberately
+  out of scope (#4 — muster is a git-diffable file store, not a transactional database).
+  (This hardens the shared `store::save`, so every command benefits, not just `apply` —
+  #5 platforms.)
 - **Versioned (#7, forward-protection).** The document carries a `schema_version`
   (reusing the store's existing `SCHEMA_VERSION`); `apply` refuses a manifest whose
   version is newer than the binary understands rather than silently misparsing it, and an
@@ -159,9 +164,11 @@ validator grades manifesto-alignment — above all:
   single source.
 - **#8 Separation of Concerns** — the (de)serialization is domain-pure; only the `cli`
   store layer touches disk. Domain never writes stdout.
-- **#9 Automated Enforcement** — `apply` is *structurally* all-or-nothing and validates
-  refs before persisting; an invalid manifest *cannot* half-write the store. `--dry-run`
-  makes preview a first-class, enforced affordance, not advice.
+- **#9 Automated Enforcement** — `apply` validates the whole document (refs + id integrity
+  + intra-document refs) *before* the single writer, so a refused manifest writes **nothing
+  at all**; and the writes that do run are per-file atomic (temp-then-rename), so one that
+  starts cannot tear a file. `--dry-run` makes preview a first-class, enforced affordance,
+  not advice.
 - **#10 Feedback Cycle** — this increment exists because using muster as a pipeline's
   goal-verifier *refuted* the assumption that per-entity commands are enough. The spec
   evolved from that observation; this is #10 in action.

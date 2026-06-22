@@ -249,6 +249,7 @@ impl EvidenceKind {
 
 /// A reference attached to a process / control / nonconformity / check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Evidence {
     pub kind: EvidenceKind,
     pub value: String,
@@ -366,6 +367,7 @@ impl fmt::Display for Evidence {
 
 /// An ordered activity inside a process; the recursion point for the graph.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Step {
     pub n: i64,
     pub description: String,
@@ -381,6 +383,7 @@ pub struct Step {
 /// A conformance signal — the #9 Automated Enforcement seam (the CI plugin's
 /// future entry point, #5 platform not feature).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Check {
     pub id: String,
     pub description: String,
@@ -428,6 +431,7 @@ impl Check {
 /// The feedback cycle made auditable (#10): append-only record of why a process
 /// hypothesis changed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Revision {
     pub ts: String,
     pub summary: String,
@@ -568,6 +572,7 @@ fn write_list(f: &mut fmt::Formatter<'_>, label: &str, items: &[String]) -> fmt:
 /// (P1 N:M — one requirement satisfied by many implementations, each resolving
 /// its own source).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Implementation {
     pub id: String,
     pub r#ref: Ref,
@@ -721,6 +726,7 @@ impl fmt::Display for Control {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogEntry {
     pub ts: String,
     pub note: String,

@@ -399,6 +399,39 @@ fn apply_refuses_an_unknown_field_leaving_store_unchanged() {
 }
 
 #[test]
+fn apply_refuses_an_unknown_field_nested_in_an_entity_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // `deny_unknown_fields` must reach NESTED structs too: serde does not propagate
+    // it from `Control` into a `Vec<Evidence>` entry, so a bogus key inside an
+    // evidence object is silently dropped unless `Evidence` itself denies it. That
+    // silent drop is the same trust-boundary hole as a top-level one, one level deeper.
+    let unknown = tmp.path().join("nested-unknown.json");
+    fs::write(
+        &unknown,
+        r#"{"controls":[{"id":"c1","title":"C","applicable":true,"status":"not_started","evidence":[{"kind":"note","value":"x","bogus_nested_field":true}]}]}"#,
+    )
+    .unwrap();
+    let out = muster(&d)
+        .args(["apply", unknown.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply of a manifest with an unknown field NESTED in an evidence entry must fail-closed"
+    );
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused nested-unknown-field apply mutated the store"
+    );
+}
+
+#[test]
 fn apply_refuses_a_duplicate_id_leaving_store_unchanged() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
