@@ -1,328 +1,295 @@
-# PLAN — muster v3: the declarative whole-store round-trip (`state` / `apply`)
+# PLAN — Harden muster v3 (additive trust-boundary hardening of `state`/`apply`)
 
-> Built on v0/v1/v2. TDD throughout (failing test first → verify red → implement →
-> verify green → atomic, conventional commit). `just check` stays green at every
-> commit. The customer-grade floor is `bash acceptance/roundtrip.sh` exiting 0
-> (committed RED today). Do NOT delete or weaken `acceptance/roundtrip.sh` or
-> `acceptance/gate.sh`.
-
----
-
-## 1. Success Criteria (mechanically verifiable by the Reviewer)
-
-Each criterion is a command the Reviewer can run; the expected result is stated.
-
-**SC-0 — Green gateway, no regression.**
-`just check` exits 0 (build + clippy + fmt + nextest workspace + health + coverage
-≥ 85%). Every pre-existing test in `crates/**` still passes unchanged. No edits to
-v0/v1/v2 *behavior* (only additive: new `state`/`apply` verbs, a new domain
-`StoreDocument` type, a refactor of `readiness` into a reusable renderer that
-preserves identical output).
-
-**SC-1 — Customer acceptance floor passes.**
-`bash acceptance/roundtrip.sh` exits 0 and prints
-`PASS: muster v3 declarative round-trip — all 6 acceptance criteria hold.`
-This single script mechanically asserts SC-2…SC-7 below (it is the SSOT for them).
-
-**SC-2 — Full read.** `muster state --output json` on a store with ≥1 process and
-≥1 ref-backed control emits ONE document whose `data` contains every process,
-control, incident, and nonconformity in the store (the editable store, NOT a
-`readiness` verdict view). `data.processes`, `data.controls`, `data.incidents`,
-`data.nonconformities` are each present (arrays). Read-only: running `state`
-twice with no other command leaves `muster state --output json` byte-identical.
-
-**SC-3 — Round-trip is a fixpoint.** Capture `A = state --output json`; wipe the
-data dir; `init`; `apply A`; capture `B = state --output json`. `diff A B` is empty.
-
-**SC-4 — Idempotent apply.** Given the captured document `A`, `apply A` then
-`apply A` again, then `state --output json`, is byte-identical to `A` (a second
-apply changes nothing).
-
-**SC-5 — `--dry-run` mutates nothing but prints the would-be verdict.**
-`muster apply --dry-run <changed-but-valid-manifest>` exits 0, prints output
-matching `ready|gaps|verdict` (case-insensitive — i.e. a real `readiness` view),
-and leaves `state --output json` identical to before the dry-run.
-
-**SC-6 — Fail-closed (all-or-nothing).** `muster apply <manifest-with-a-dangling
-file_anchor anchor>` exits non-zero, its error names the offending control id and
-the fix, and `state --output json` is byte-identical before and after the failed
-apply (the store is left exactly as it was — no partial write).
-
-**SC-7 — Discoverability.** `muster explain` output contains both `state` and
-`apply`; `muster catalog --output json` lists subcommands named `state` and
-`apply` (catalog is clap-derived, so this is automatic — asserted by a test).
-
-**SC-8 — Honest dual-surface + exit codes.** `state` and `apply` use exit codes
-0 (ok) / 1 (command error) only (never the reserved 3). `state --output json` and
-`apply --output json` emit the standard CKSPEC envelope (`{status, command, data}`)
-on stdout; human mode mirrors the SAME fields with no JSON-only or human-only data.
-
-**SC-9 — Domain purity (#8).** The `StoreDocument` (de)serialization lives in
-`crates/domain` and does no I/O and writes no stdout. Disk access stays in
-`crates/cli/src/store.rs`; ref resolution stays in `crates/cli/src/resolve.rs`.
-The existing architecture-violation tests (domain imports clap/figment/tracing/
-infrastructure) remain green.
-
-**SC-10 — Recursive dogfood gate (informational, must not regress).**
-`bash acceptance/gate.sh` exits 0 (`muster`'s own `readiness --require-ready`
-verdict over a control wired to the live exit code of `roundtrip.sh` is READY).
-This passes for free once SC-1 holds; the Reviewer runs it as the closing check.
+> The existing `state`/`apply` implementation is correct and lean. This is **additive
+> hardening** — no rewrite. Every change is the smallest mechanism that closes one gap
+> (#4 Lean Iteration). `just check` stays green; no regression to v0/v1/v2 or the green
+> v3 already on this branch. TDD throughout: failing test first → verify it fails →
+> implement → verify it passes → atomic, conventional, green commit.
 
 ---
 
-## 2. Architecture
+## Context (what exists today, verified by reading the source)
 
-### 2.1 The one schema (#7 SSOT): `domain::StoreDocument`
+- `domain::StoreDocument` (`crates/domain/src/document.rs`) is the one schema in/out: four
+  `Vec` fields (`processes/controls/incidents/nonconformities`), each `#[serde(default)]`.
+  `From<&Store>` serializes; `upsert_into(&mut Store)` merges by id (BTreeMap insert → a
+  duplicate id in the manifest **silently last-write-wins**).
+- `apply` (`crates/cli/src/apply.rs`) today: read file → `serde_json::Value` (malformed-JSON
+  error) → **stringly-typed envelope unwrap** (`map.contains_key("command") && contains_key("data")`)
+  → `from_value::<StoreDocument>` (wrong-shape error) → `load+upsert_into` → `validate_store_refs`
+  (dangling `file_anchor`/`command` ref → refuse) → dry-run branch → `store::save`.
+- `store::save` (`crates/cli/src/store.rs`) writes each entity directly with `std::fs::write`
+  (one `to_string_pretty(..)+"\n"` per `<id>.json`) — **not atomic**, can tear on ENOSPC.
+- `SCHEMA_VERSION` is a **private** `const … = 1` in `crates/cli/src/store.rs`, used only to
+  stamp `manifest.json` at `init`. `StoreDocument` has **no** `schema_version`.
+- Entity structs (`Process/Control/Incident/Nonconformity`, `crates/domain/src/model.rs`) do
+  **not** carry `#[serde(deny_unknown_fields)]` → a misspelled key is silently dropped.
+- The interactive mutators (`crates/domain/src/store.rs`) already enforce `validate_slug`,
+  `DuplicateId`, and referential existence (`require_process`/`require_control`); `apply` is a
+  **back door around them** today (it only validates refs, not id integrity / intra-doc refs).
+- `WithNext` (`crates/cli/src/view.rs`) serializes **transparently** — the `state` envelope's
+  `data` is a clean `StoreDocument` with no extra keys (confirmed; this is why
+  `deny_unknown_fields` on `StoreDocument` is safe — see Architecture §A).
+- `Ref`/`Resolution`/`Derived` are **internally tagged** (`#[serde(tag = "…")]`); none of the
+  four entity structs use `#[serde(flatten)]` → `deny_unknown_fields` composes cleanly.
+- Acceptance: `acceptance/roundtrip.sh` is committed **RED**, now carrying criteria **7
+  (duplicate-id refused)** and **8 (unknown-field refused)**. Integration TDD lane:
+  `crates/cli/tests/roundtrip.rs`.
 
-The manifest IS the store shape. There is no second hand-maintained schema.
-Add a pure, serde type in `crates/domain` (a new `crates/domain/src/document.rs`
-re-exported from `lib.rs`, or in `store.rs`):
+---
 
+## Success Criteria (each mechanically verifiable by the Reviewer)
+
+**Gate (the definition of done):**
+- **SC-0a** `just check` exits 0 (build + clippy + full test suite + health).
+- **SC-0b** `bash acceptance/roundtrip.sh` exits 0 — all 8 criteria, **including the
+  committed-RED 7 (duplicate-id refused) and 8 (unknown-field refused)**. `roundtrip.sh` is
+  **not** modified or weakened.
+
+**Trust boundary — `apply` validates the full matrix before the single persist, fail-closed:**
+- **SC-1 (unknown fields)** `#[serde(deny_unknown_fields)]` is present on `StoreDocument` and on
+  `Process`, `Control`, `Incident`, `Nonconformity`. A manifest with a bogus key on any of these
+  is **refused** (exit 1), store left byte-identical. The `state→apply` round-trip still holds
+  (state emits only known fields). Verified by roundtrip.sh #8 + a new integration test.
+- **SC-2 (id integrity)** A new **domain-pure** `StoreDocument::validate(&self, merged: &Store)`
+  runs in `apply` **beside** `validate_store_refs`, **before** `store::save`, and refuses:
+  - any entity id that is **not a valid slug** (reuses `domain::validate_slug`);
+  - a **duplicate id within a category** (scanned over the manifest's `Vec`s, since the merged
+    BTreeMap has already deduped). Verified by roundtrip.sh #7 + integration tests.
+- **SC-3 (intra-document refs)** `validate` also refuses a `process_ref` / `control_ref` /
+  `step.controls` / process-`controls` link that resolves in **neither the manifest nor the
+  existing store** (checked against `merged`). Error names the offending entity + the dangling
+  id. Verified by an integration test (dangling intra-doc ref → exit 1, store unchanged).
+- **SC-4 (offender naming)** With **two** ref-backed controls where only **one** is broken, the
+  fail-closed error text contains the broken control's id and **not** the healthy one's.
+
+**All-or-nothing persistence:**
+- **SC-5 (atomic save)** `store::save` writes via **temp-then-rename**: every entity is
+  serialized to a temp file first (any serialize/IO failure aborts **before any live file is
+  touched**), then temps are renamed into place. After a **successful** `apply`, the data dir
+  contains **no** stray temp/staging files (`find "$DATA" -name '*.tmp'` is empty), and the
+  round-trip stays **byte-identical** (rename does not perturb bytes). Atomicity-on-FAILURE is
+  the load-bearing claim, so it is verified directly: a **store-layer test forces a save failure
+  after a live entity file exists** (pre-creates `<id>.json.tmp` as a directory so phase-1 staging
+  fails) and asserts the pre-existing `<id>.json` is **byte-unchanged** (RED under a direct write,
+  GREEN under temp-then-rename). The no-leftover claim is verified by an integration test asserting
+  no `*.tmp` remains. (`roundtrip.sh` carries no atomic assertion — its #7 is the duplicate-id check.)
+
+**Versioning:**
+- **SC-6 (schema_version, SSOT)** `SCHEMA_VERSION` is the **single source** (moved to
+  `domain`, reused by both the manifest stamp and `StoreDocument`). `state` emits a
+  `schema_version` field; `apply` of a manifest whose `schema_version` **exceeds** the binary's
+  is refused with an honest error (not a silent misparse); an **unversioned** manifest defaults
+  to **v1** and is accepted. Verified by integration tests + roundtrip.sh #8 staying green.
+
+**Closed test holes (mutation-detection gaps):**
+- **SC-7 (timestamped fixpoint)** `roundtrip.rs` fixpoint **and** `--dry-run` tests seed a
+  `command`-ref under `MUSTER_CMD_CACHE=1` resolved to carry a `resolved_ts`, and assert
+  byte-identity **including the unchanged timestamp** (catches an apply re-stamp / drop-timestamp
+  regression that a timestamp-free seed misses).
+- **SC-8 (multi-entity ordering)** A fixpoint test with **≥2 processes and ≥2 controls inserted
+  out of id order** proves deterministic ordering survives the disk round-trip.
+- **SC-9 (direct negatives)** Integration tests pin: **malformed JSON**, **missing file**, and
+  **empty `{}` manifest** behaviors (each with an explicit, asserted outcome).
+
+**Robustness / clarity:**
+- **SC-10 (typed envelope unwrap)** The `map.contains_key` probe in `apply.rs` is replaced by a
+  typed `#[serde(untagged)]` enum, **keeping the two honest error messages** (malformed-JSON via
+  the `Value` parse; wrong-shape via the typed parse). Bare document **and** enveloped document
+  both still apply (existing `apply_accepts_a_bare_document_without_the_envelope` test stays green).
+- **SC-11 (doc wording)** `apply --dry-run`'s help/doc states it prints the would-be readiness
+  verdict but does **not** gate the exit code. (`state`/`apply` use exit 0/1 only — #1
+  Truth-Seeking: doc words match the mechanism.)
+
+---
+
+## Architecture
+
+### §A Why `deny_unknown_fields` is safe here (no round-trip regression)
+`state`'s JSON `data` is a transparent serialization of `StoreDocument` (WithNext adds nothing to
+JSON). Every entity field is either always-serialized or `skip_serializing_if` (absent ⇒ serde
+`default` on read). So state never emits a key the structs don't declare ⇒ `apply(state())` never
+trips `deny_unknown_fields`. The four structs use no `#[serde(flatten)]`, and `Ref` is internally
+tagged (its `kind` discriminator is Ref's concern, not the entity's), so the attribute composes.
+Nested structs (`Step`, `Check`, `Implementation`, `Evidence`, `Revision`, `LogEntry`) are **out of
+scope** for the required deny set (SPEC names the four + `StoreDocument`); leave them unchanged to
+keep the change minimal and the diff reviewable.
+
+### §B `schema_version` as SSOT (#7)
+Move the constant to the domain crate so the one schema number flows in and out from one place:
+- Add `pub const SCHEMA_VERSION: u32 = 1;` to `crates/domain/src/store.rs`; re-export it as
+  `domain::SCHEMA_VERSION` from `crates/domain/src/lib.rs`.
+- `crates/cli/src/store.rs`: delete the private `const SCHEMA_VERSION` and `use domain::SCHEMA_VERSION`
+  (the `init` manifest stamp keeps writing `{"schema_version": 1}` — byte-identical, no regression).
+- `StoreDocument` gains `pub schema_version: u32` with `#[serde(default = "default_schema_version")]`
+  where `default_schema_version()` returns `SCHEMA_VERSION` (⇒ unversioned manifest = v1). Declare it
+  **first** so state output leads with it deterministically. **Replace `#[derive(Default)]` with a
+  hand-written `impl Default`** that sets `schema_version = SCHEMA_VERSION` and empty vecs (a derived
+  `Default` would wrongly yield `0`). `From<&Store>` sets `schema_version: SCHEMA_VERSION`.
+
+### §C Domain-pure validation (#8, #9)
+New `impl StoreDocument { pub fn validate(&self, merged: &Store) -> Result<(), DomainError> }` in
+`document.rs` (pure — no I/O, no stdout). It is the structural sibling of `validate_store_refs`
+(which stays in `cli/resolve.rs` because it does live ref I/O):
+1. **id integrity** — iterate each manifest `Vec` (`processes/controls/incidents/nonconformities`);
+   per category track a seen-set; `validate_slug(id)?` each; on a repeat id return
+   `DomainError::DuplicateId { kind, id }`.
+2. **intra-document refs against `merged`** (present in manifest ∪ existing store):
+   - `process.controls[*]` → `merged.controls`
+   - `process.steps[*].process_ref` → `merged.processes`; `process.steps[*].controls[*]` → `merged.controls`
+   - `incident.process_ref` → `merged.processes`
+   - `nonconformity.process_ref` → `merged.processes`; `nonconformity.control_ref` → `merged.controls`
+   On a miss return `DomainError::MissingReference { kind, id, fix }` whose text names the **offending
+   entity** and the dangling id (so SC-4's "name the offender, not the healthy one" holds).
+   (Note: the document shape has no `from_incident` field — it is a transient CLI arg the interactive
+   path resolves into `source`+`process_ref`; the persisted nonconformity carries `process_ref`/
+   `control_ref`, which are what we validate.)
+
+`apply` calls `merged… ; doc.validate(&merged)? ; resolve::validate_store_refs(&merged)?` **before**
+the `--dry-run` branch, so an invalid manifest is refused in dry-run too, and (because the single
+writer `store::save` is reached only after both pass) a refused apply is structurally all-or-nothing.
+
+### §D Atomic `store::save` (temp-then-rename, #3, not a transactional store, #4)
+Keep the public signature `pub fn save(dir: &Path, store: &Store) -> Result<(), StoreError>`.
+Two phases:
+1. **Serialize + stage**: for every entity in all four categories, compute `to_string_pretty+"\n"`
+   (byte-identical to today) and write it to a temp file `<sub>/<id>.json.tmp`; collect
+   `(temp_path, final_path)` pairs. **Any serialize or write error aborts here**, best-effort removes
+   the temps already written, and returns `Err` — **no live `<id>.json` touched yet**.
+2. **Commit**: `std::fs::rename(temp, final)` each pair (atomic per file on the same filesystem).
+After phase 2 no `*.tmp` remain. `load()` already ignores non-`.json` files, so a temp's `.tmp`
+extension is invisible to readers even between phases. (Per #4 this is temp+rename, **not** a
+cross-file transaction; the common tear cause — ENOSPC / interruption mid-serialize — is fully
+covered because it happens in phase 1 before any live file changes.)
+
+### §E Typed envelope unwrap (#1, SC-10)
+Replace the `contains_key` probe with a typed unwrap that keeps the two honest messages:
 ```rust
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct StoreDocument {
-    #[serde(default)] pub processes: Vec<Process>,
-    #[serde(default)] pub controls: Vec<Control>,
-    #[serde(default)] pub incidents: Vec<Incident>,
-    #[serde(default)] pub nonconformities: Vec<Nonconformity>,
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Manifest {
+    Enveloped { data: serde_json::Value }, // ignores status/command/next (NOT deny_unknown_fields)
+    Bare(serde_json::Value),               // a bare document
 }
 ```
+Flow in `apply`:
+1. `serde_json::from_str::<serde_json::Value>(&text)` → **malformed-JSON** error (message unchanged).
+2. `serde_json::from_value::<Manifest>(value)` → unwrap to the inner `data` `Value` (Enveloped first
+   so an envelope is matched before Bare; a bare doc has no `data` key ⇒ falls through to Bare).
+3. `serde_json::from_value::<StoreDocument>(data)` → **wrong-shape / unknown-field** error. Doing the
+   `StoreDocument` parse as the final step (rather than embedding it in the untagged variant) keeps
+   serde's `deny_unknown_fields` message — which **names the offending field** — intact (an untagged
+   enum would swallow it into a vague "did not match any variant"). This satisfies "use a typed
+   untagged enum" while preserving #1 Truth-Seeking error quality.
 
-- Arrays, not maps: every entity already carries its own `id`, and the source
-  `Store` is `BTreeMap`-keyed so `.values()` is already id-sorted → deterministic,
-  diffable output (#7, AX). `#[serde(default)]` on each field keeps a manifest that
-  omits an empty category readable.
-- `From<&Store> for StoreDocument` (state direction): collect `s.processes.values()
-  .cloned()` etc. — id-sorted, deterministic, NO ref re-resolution, NO mutation.
-- `StoreDocument::upsert_into(&self, &mut Store)` (apply direction): for each entity,
-  `store.processes.insert(e.id.clone(), e.clone())` etc. — create-or-replace by id,
-  no prune. Pure: no validation of refs here (that is the cli's resolution job),
-  only the structural merge.
+After parse, immediately: `if doc.schema_version > domain::SCHEMA_VERSION { return Err(honest msg) }`.
 
-This type is the single source flowing OUT (`state`) and IN (`apply`). Because
-`Process`/`Control`/`Incident`/`Nonconformity` are already faithful serde
-round-trips (proven by existing tests, e.g. `no_ref_control_serializes_byte_
-identical_to_v0`) and `BTreeMap` iteration is id-sorted, `state(apply(state())) ==
-state()` holds structurally.
+### §F Doc wording (SC-11)
+In `crates/cli/src/root.rs`, `ApplyArgs::dry_run` doc comment: state it prints the would-be readiness
+verdict but does **not** gate the exit code (`apply` uses 0/1 only). Mirror the clarification in the
+`apply.rs` module doc if it implies otherwise.
 
-### 2.2 `muster state` — `crates/cli/src/state.rs`
+---
 
-`pub fn execute(output: &Output) -> Result<(), Box<dyn Error>>`:
-1. `let s = store::load(&store::data_dir())?;` (errors honestly if uninitialized).
-2. `let doc = StoreDocument::from(&s);`
-3. Render via `output.success("state", &StateView::new(&doc), &mut io::stdout())`.
-   - JSON mode → CKSPEC envelope `{status, command:"state", data:{processes,…}}`.
-   - Human mode → a `Display` that lists each category with a count and the entity
-     ids/titles (mirrors the same fields; no human-only data, no markdown).
-4. NO `store::save` — `state` is structurally read-only.
+## Implementation Checklist (ordered; each step is RED → GREEN → atomic commit)
 
-Reuse the `WithNext` wrapper (human-only "Next:" hint, JSON-transparent) so the
-JSON `data` stays a clean serialization of `StoreDocument`.
+> Run `just check` before starting (must be green). Each step: write/adjust the failing test
+> first, run it to see it fail for the right reason, implement, run to green, then
+> `git commit` (conventional message). Keep test + implementation in one atomic commit per the
+> project's TDD rule.
 
-### 2.3 `muster apply <manifest> [--dry-run]` — `crates/cli/src/apply.rs`
+1. **SSOT `SCHEMA_VERSION` move** (`feat(domain): SCHEMA_VERSION is the one schema number`)
+   - Add `pub const SCHEMA_VERSION: u32 = 1;` to `crates/domain/src/store.rs`; export from `lib.rs`.
+   - In `crates/cli/src/store.rs` remove the private const and `use domain::SCHEMA_VERSION`.
+   - Test: a domain unit test asserts `domain::SCHEMA_VERSION == 1`; existing init/manifest tests
+     stay green (manifest still `{"schema_version":1}`).
 
-`pub fn execute(args: ApplyArgs, output: &Output) -> Result<(), Box<dyn Error>>`:
+2. **`StoreDocument.schema_version` + emit on `state`** (`feat: state emits schema_version`)
+   - Add the field (declared first), `default_schema_version`, manual `impl Default`, set it in
+     `From<&Store>`.
+   - Tests: (a) `state --output json` `data.schema_version == 1`; (b) the existing
+     `omitted_categories_default_to_empty` parse still works and yields `schema_version == 1`;
+     (c) `in_memory_round_trip_is_a_fixpoint` still passes.
 
-1. **Read + parse the manifest (fail-closed on shape).**
-   - Read the file (honest error naming the path if unreadable).
-   - Parse to `serde_json::Value` (JSON path; `.json`/no-extension). **Envelope
-     unwrap:** `state --output json` emits the CKSPEC envelope, so if the parsed
-     value is an object containing both `"command"` and `"data"`, take `["data"]`;
-     otherwise use the whole value (accept a bare document too). This is what makes
-     `apply(state())` work against the literal bytes `state` emitted.
-   - `serde_json::from_value::<StoreDocument>(doc_value)` — a malformed shape is
-     refused here as a whole, the error naming the parse failure / offending field.
-   - (TOML is OUT OF SCOPE for v3 core — JSON is the required, authoritative shape
-     the acceptance drives. Do not invent a third schema. A `.toml` manifest may be
-     added later by reusing the `toml` crate already in infra; do not build it now.)
+3. **`apply` refuses a newer schema_version** (`feat: apply rejects a future schema_version`)
+   - After parse, `if doc.schema_version > domain::SCHEMA_VERSION { Err(...) }`.
+   - Tests: a manifest with `schema_version: 999` → exit 1, store unchanged, error mentions version;
+     an unversioned (`schema_version` omitted) manifest → accepted as v1.
 
-2. **Build the merged would-be store in memory (no disk writes yet).**
-   - `let mut merged = store::load(&dir)?;` (the current store; `apply` requires an
-     initialized store).
-   - `doc.upsert_into(&mut merged);` (upsert by id, no prune).
+4. **`deny_unknown_fields`** (`feat: apply refuses unknown fields (no silent drop)`)
+   - Add `#[serde(deny_unknown_fields)]` to `StoreDocument` and to `Process/Control/Incident/
+     Nonconformity`.
+   - Tests: bogus key on a control → `apply` exit 1, store unchanged (mirrors roundtrip.sh #8);
+     confirm `state→apply` round-trip unaffected (existing fixpoint tests green).
 
-3. **Fail-closed ref validation BEFORE any persist (#9).**
-   - For every control in `merged`: validate the control's own `ref` AND each
-     implementation's `ref` AND every ref-backed check in every process, by
-     resolving it through `resolve::resolve` (the same engine `control add` uses in
-     `validate_ref_at_store_time`). Any `file_anchor`/`command` ref that resolves to
-     `Resolution::Unresolved` → return `Err` naming the offending **entity id** and
-     the fix (e.g. `"refusing to apply: control 'cov-bar' has a file_anchor that
-     does not resolve — anchor 'coverage.DOES_NOT_EXIST' not found in '…' …; the
-     store was left unchanged"`). A `command` ref's non-zero exit is a legitimate
-     *fail*, not an apply error — only an Unresolved (spawn failure / missing file /
-     missing anchor / malformed shape) refuses the whole manifest. Generalize the
-     existing `control.rs::validate_ref_at_store_time` into a shared cli helper
-     (e.g. `resolve::validate_store_refs(&Store) -> Result<(), String>`) so the
-     "fix the source" message wording is SSOT.
-   - Because validation completes fully before step 4, and step 4 is the only
-     writer, a refused manifest leaves the on-disk store byte-for-byte untouched
-     (structural all-or-nothing).
+5. **Domain-pure `StoreDocument::validate`** (`feat(domain): validate id integrity + intra-doc refs`)
+   - Implement per §C; add domain unit tests for: duplicate id, invalid slug, dangling
+     `process_ref`/`control_ref`/`step.controls`/process-`controls` (each → the right `DomainError`),
+     and a valid document → `Ok`.
 
-4. **Branch on `--dry-run`.**
-   - **`--dry-run` (no mutation):** compute `readiness` over `merged` and render the
-     would-be verdict via the SHARED readiness renderer (see 2.4). Do NOT call
-     `store::save`. Output must contain a real readiness view (matches
-     `ready|gaps|verdict`). Return `Ok`.
-   - **default (persist):** `store::save(&dir, &merged)?;` then render a success
-     summary (counts upserted per category) through the output pipeline.
-     - Idempotency (SC-4) is structural: `save` serializes each entity with
-       `to_string_pretty`; re-applying the same document writes byte-identical files,
-       so a subsequent `state` is byte-identical.
+6. **Wire `validate` into `apply`** (`feat: apply validates the full matrix before persist`)
+   - Call `doc.validate(&merged)?` beside `validate_store_refs(&merged)?`, before the dry-run branch.
+   - Tests: roundtrip.sh #7 (duplicate id) passes; integration tests for duplicate id, invalid slug,
+     and dangling intra-doc ref → exit 1 + store byte-identical.
 
-`ApplyArgs` (in `root.rs`): `{ manifest: String, #[arg(long)] dry_run: bool }`.
+7. **Atomic `store::save`** (`feat: atomic store::save via temp-then-rename`)
+   - Refactor per §D, signature unchanged.
+   - Tests: a **store-layer save-FAILURE test** asserts a pre-existing `<id>.json` is byte-unchanged
+     when phase-1 staging fails (RED under a direct write, GREEN under temp-then-rename — the genuine
+     atomicity guard); plus, after a successful `apply`, `find <DATA> -name '*.tmp'` is empty AND the
+     round-trip is byte-identical (an integration test). Existing idempotency/fixpoint tests stay green.
 
-### 2.4 Reuse `readiness` (SSOT, #7) for `apply --dry-run`
+8. **Typed untagged envelope unwrap** (`refactor: typed untagged envelope unwrap in apply`)
+   - Replace the `contains_key` probe per §E; keep both error messages.
+   - Tests: malformed JSON → message-1; wrong-shape → message-2; `apply_accepts_a_bare_document…`
+     stays green; an enveloped `state` output still applies.
 
-Refactor `crates/cli/src/readiness.rs` so the index-build + `domain::readiness_with`
-+ view-render logic is a reusable function operating on an in-memory `Store`, e.g.:
+9. **Doc wording** (`docs: clarify apply --dry-run does not gate the exit code`)
+   - Tighten `ApplyArgs::dry_run` (and module doc). Pure-doc; `just check` green.
 
-```rust
-pub(crate) fn render_for_store(
-    s: Store, process: Option<&str>, output: &Output, command: &str,
-) -> Result<bool /* is_ready */, Box<dyn Error>>;
+10. **Close the integration test holes** (`test: timestamped fixpoint, ordering, offender, negatives`)
+    - **SC-7**: add a helper that seeds a `command`-ref control (`--ref-cmd true --ref-dir .`) and runs
+      `control resolve` under `MUSTER_CMD_CACHE=1` so a `resolved` cache with `resolved_ts` is persisted;
+      add a fixpoint test and a `--dry-run` test asserting byte-identity **including** that timestamp.
+    - **SC-8**: fixpoint test seeding ≥2 processes + ≥2 controls **out of id order** → state→wipe→apply
+      →state byte-identical and id-sorted.
+    - **SC-4**: fail-closed test with two ref-backed controls, break only one anchor, assert the error
+      contains the broken id and **not** the healthy id.
+    - **SC-9**: direct negatives — malformed JSON, missing file, empty `{}` manifest — each asserting the
+      explicit chosen outcome (malformed/missing → exit 1 with the honest message; `{}` → accepted as an
+      empty upsert that prunes nothing, leaving the store unchanged; pin whichever the implementation
+      yields and document it in the test name/comment).
+
+11. **Full verification** (`chore: final green`)
+    - `just check` green; `bash acceptance/roundtrip.sh` exits 0. Re-read the diff for convention
+      violations (SSOT constants, no inline duplicate strings, domain stays I/O-free).
+
+---
+
+## Testing Strategy
+
+- **Two lanes, same contract.** `crates/cli/tests/roundtrip.rs` is the idiomatic Rust red→green lane
+  (drives the public CLI in both surfaces); `acceptance/roundtrip.sh` is the independent customer-grade
+  floor the validator runs. Do not weaken `roundtrip.sh`; make criteria 7 & 8 pass by mechanism.
+- **Domain unit tests** (`document.rs`, `store.rs`, `model.rs`) cover the pure pieces:
+  `validate` matrix, `schema_version` default/From, slug + duplicate detection — fast, no fs.
+- **CLI integration tests** cover end-to-end behavior through `assert_cmd`: fail-closed exits +
+  byte-identical store after refusal, atomic-save no-temp-leftover, typed-unwrap error messages,
+  schema_version gate, and the closed holes (SC-4/7/8/9).
+- **Byte-identity is the oracle.** Capture `state --output json` to bytes; after wipe→apply→state (or
+  after a refused apply) compare raw bytes. The SC-7 timestamped seed makes a re-stamp/drop-timestamp
+  regression actually fail (a timestamp-free seed cannot catch it).
+- **Negative-path discipline.** Every fail-closed test asserts BOTH exit-non-zero AND store-unchanged
+  (all-or-nothing), and — where applicable — that the error **names the offending entity**.
+- **Regression guard.** Run the **whole** workspace suite (`just check`, which runs `cargo nextest`/
+  `cargo test --workspace` + clippy + health) after each step; v0/v1/v2 and the green v3 must stay green.
+- **Manifesto lens (validator grades this):** #1 doc words match mechanism (SC-11, honest errors);
+  #3 atomic write is built, not documented-around (SC-5); #9 fail-closed validated before persist
+  (SC-1/2/3); #4 smallest change per gap (temp+rename, not a transaction; deny only the four structs);
+  #7 one `SCHEMA_VERSION`, one schema in and out (SC-6).
+
+---
+
+```json
+{"rationale": "Wrote PLAN.md: additive, TDD-ordered hardening of muster v3 apply (deny_unknown_fields, domain-pure id/intra-doc validation, atomic temp-then-rename save, schema_version SSOT, typed untagged envelope unwrap) plus the closed test holes, with mechanically-verifiable success criteria gated on `just check` + `acceptance/roundtrip.sh`.", "evidence": {"files": ["PLAN.md"]}}
 ```
-
-`readiness::execute` becomes: `load → render_for_store(s, scope, output, "readiness")
-→ map is_ready + require_ready to Outcome`. `apply --dry-run` calls
-`render_for_store(merged, None, output, "apply")`. The existing readiness JSON/human
-output must be unchanged (verified by the existing readiness tests staying green).
-
-### 2.5 Wiring (clap + dispatch)
-
-- `root.rs`: add to `enum Commands`:
-  `State` (doc: "Read the entire store as one declarative document (read-only)") and
-  `Apply(ApplyArgs)` (doc: "Reconcile the store to a manifest — upsert, idempotent,
-  fail-closed"). Catalog inclusion (SC-7) is then automatic (clap-derived).
-- `main.rs`:
-  - `mod state; mod apply;`
-  - `subcommand_name`: add `State => "state"`, `Apply(_) => "apply"` (this `match`
-    is exhaustive, so the compiler forces these additions — do not add a fallback).
-  - dispatch: `Commands::State => state::execute(&output).map(|()| Outcome::Ok)`,
-    `Commands::Apply(a) => apply::execute(a, &output).map(|()| Outcome::Ok)`.
-- `explain.rs`: append two `INTENTS` rows so `explain` lists the verbs:
-  `("Read the whole store as one document", "muster state --output json")` and
-  `("Author/update the whole store from a manifest (the declarative round-trip)",
-  "muster apply <manifest>  (preview with --dry-run)")`.
-- `lib.rs` (domain): `pub use … StoreDocument;`.
-
----
-
-## 3. Implementation Checklist (ordered — each step is one atomic, green commit)
-
-> TDD rule for every step: write the failing test FIRST, run it, SEE it fail for the
-> right reason, implement the minimum to pass, run `just check`, commit.
-
-1. **`feat(domain): StoreDocument — the one schema in and out`**
-   - Test (`crates/domain` `#[cfg(test)]`): `StoreDocument::from(&Store)` collects
-     all four categories id-sorted; `upsert_into` creates-or-replaces by id (no
-     prune: an entity already present and absent from the doc survives); a
-     build→serialize→deserialize→upsert into an empty store reproduces an equal
-     `Store` (the in-memory fixpoint).
-   - Implement the type, `From<&Store>`, `upsert_into`, derive serde; export from
-     `lib.rs`.
-
-2. **`feat(cli): muster state — read the whole store, read-only`**
-   - Integration test (`crates/cli/tests/`, new `roundtrip.rs` or extend
-     `muster.rs`, `MUSTER_DATA_DIR` temp pattern): seed a process + a ref-backed
-     control; `state --output json` envelope `command=="state"` and
-     `data.processes`/`data.controls` contain the seeded ids; running `state` twice
-     yields identical bytes (read-only); human-mode `state` contains the same ids.
-   - Implement `state.rs`, wire `Commands::State` + dispatch + `subcommand_name`.
-
-3. **`refactor(cli): reuse readiness renderer over an in-memory store`**
-   - No behavior change: keep all existing `readiness` tests green; add a unit/
-     integration check that `readiness` output is unchanged (snapshot a couple of
-     known fields). Extract `render_for_store` and re-point `readiness::execute` at it.
-
-4. **`feat(cli): muster apply — upsert, idempotent, fail-closed, dry-run`**
-   - Integration tests (red→green), each with a `MUSTER_DATA_DIR` temp store and an
-     absolute-path `file_anchor` fixture:
-     - **round-trip fixpoint:** capture `state` → wipe dir → `init` → `apply` the
-       captured file → `state` equals the capture (SC-3).
-     - **idempotent:** `apply` twice → `state` equals the capture (SC-4).
-     - **dry-run no-mutation + verdict:** mutate a free-text value in the captured
-       doc → `apply --dry-run` exits 0, prints `ready|gaps|verdict`, and `state` is
-       unchanged (SC-5).
-     - **fail-closed:** break the control's anchor to a dangling segment →
-       `apply` exits non-zero, error names the control id, `state` unchanged (SC-6).
-     - **envelope unwrap:** `apply` accepts the literal `state --output json`
-       envelope bytes (implicitly covered by the fixpoint test).
-   - Implement `apply.rs` (parse + envelope-unwrap + merge + validate + dry-run/save),
-     the shared `resolve::validate_store_refs` helper, wire `Commands::Apply`,
-     dispatch, `subcommand_name`.
-
-5. **`feat(cli): explain + catalog list the two new verbs`**
-   - Test: `catalog --output json` `data.commands[].name` includes `state` and
-     `apply` (extend the catalog test or add a cli test); `explain` output contains
-     both substrings.
-   - Add the two `INTENTS` rows. (Catalog needs no code change — clap-derived.)
-
-6. **`test(acceptance): turn the v3 floor green`**
-   - Run `bash acceptance/roundtrip.sh` → must print PASS / exit 0 (SC-1).
-   - Run `bash acceptance/gate.sh` → must exit 0 / READY (SC-10).
-   - Do NOT modify either script. If a script fails, fix the implementation, not the
-     script.
-
-7. **`docs(changelog): note muster v3 state/apply round-trip`** (+ README/AGENTS if a
-   command table lists verbs). Keep docs honest and minimal; no behavior in this commit.
-
-> Each commit is atomic and `just check`-green. Suggested order keeps the tree green:
-> domain type → state → readiness refactor → apply → discoverability → acceptance →
-> docs.
-
----
-
-## 4. Testing Strategy
-
-- **Domain unit tests (pure, fast):** `StoreDocument` from/upsert/serde-round-trip,
-  including the no-prune invariant and the empty-category default. These guard the
-  one-schema SSOT (#7) and run with no I/O (#8).
-- **CLI integration tests (`crates/cli/tests/`, `assert_cmd` + `TempDir` +
-  `MUSTER_DATA_DIR`):** mirror the six acceptance criteria as idiomatic Rust tests
-  (the TDD red→green lane) so failures are precise and pre-commit-enforced, with
-  absolute-path `file_anchor` fixtures for cwd-independent resolution. Cover both
-  `--output json` (envelope shape) and human mode (same fields) for SC-8.
-- **Black-box acceptance (`acceptance/roundtrip.sh`):** the independent,
-  schema-agnostic customer floor (SC-1) — string-replace differs on real `state`
-  output, no internal schema knowledge. Driven only by the built binary. The goal of
-  the run is to make it exit 0 without weakening it.
-- **Recursive dogfood (`acceptance/gate.sh`):** muster's own `readiness
-  --require-ready` over a command-ref wired to the live exit code of `roundtrip.sh`
-  (SC-10) — the closing confidence check.
-- **Regression guard:** full `just check` (workspace nextest + clippy + fmt +
-  health + coverage ≥ 85%) at every commit; the architecture-violation tests keep
-  domain pure (SC-9); existing readiness tests pin the refactor as behavior-neutral.
-- **Edge cases to assert explicitly:** a manifest with a missing/empty category
-  (defaults apply); upsert replacing an existing entity by id while leaving an
-  unrelated existing entity intact (no prune); a malformed-shape manifest refused as
-  a whole; `apply` against an uninitialized store erroring honestly; `--dry-run` over
-  a fail-closed (dangling-anchor) manifest still refusing (validation precedes the
-  dry-run verdict).
-
----
-
-## 5. Guardrails
-
-**Must have:** `just check` green at every commit; `acceptance/roundtrip.sh` exit 0;
-the one schema (`StoreDocument`) flowing both directions; `state` read-only; `apply`
-upsert + idempotent + fail-closed + `--dry-run`; domain-pure (de)serialization;
-explain + catalog list both verbs; exit codes 0/1 only for the new verbs.
-
-**Must NOT have:** a second/hand-maintained schema; prune/delete-on-apply; new ref
-kinds, network, LLM, UI, merge/3-way semantics, migration tooling, new entity types;
-any mutation in `state`; any partial write on a refused `apply`; domain code touching
-disk or stdout; deletion or weakening of the acceptance scripts; regression to any
-v0/v1/v2 behavior.
-
----
-
-## 6. Open Questions (resolved by sensible default; flag only if the loop disagrees)
-
-- **Envelope vs bare document for `apply` input:** RESOLVED — `apply` accepts the
-  CKSPEC envelope `state --output json` emits (unwrap `.data`) AND a bare document.
-  This is required for the acceptance's `apply(state())` to round-trip on the literal
-  bytes.
-- **TOML manifests:** RESOLVED — out of scope for v3 core (JSON is the required,
-  authoritative, acceptance-driven shape). Reuse the existing `toml` crate later if
-  needed; do not build it now (#4 minimal).
