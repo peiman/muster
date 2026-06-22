@@ -146,6 +146,8 @@ pub enum Commands {
     Nonconformity(NonconformityCmd),
     /// Certification-readiness truth-meter over the process graph
     Readiness(ReadinessArgs),
+    /// Read the entire store as one declarative document (read-only)
+    State,
 
     /// Check connectivity — returns pong (framework worked example)
     Ping,

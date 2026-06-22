@@ -13,6 +13,7 @@ mod process;
 mod readiness;
 mod resolve;
 mod root;
+mod state;
 mod store;
 mod version;
 mod view;
@@ -222,6 +223,7 @@ fn subcommand_name(command: &root::Commands) -> &'static str {
         root::Commands::Incident(_) => "incident",
         root::Commands::Nonconformity(_) => "nonconformity",
         root::Commands::Readiness(_) => "readiness",
+        root::Commands::State => "state",
         root::Commands::Ping => "ping",
         root::Commands::Version => "version",
         root::Commands::Catalog => "catalog",
@@ -343,6 +345,7 @@ fn run_inner(cli: root::Cli) -> Result<(LogGuard, i32), RunError> {
             nonconformity::execute(c.sub, &output).map(|()| Outcome::Ok)
         }
         root::Commands::Readiness(a) => readiness::execute(a, &output),
+        root::Commands::State => state::execute(&output).map(|()| Outcome::Ok),
         root::Commands::Ping => ping::execute(&output)
             .map(|()| Outcome::Ok)
             .map_err(|e| Box::new(e) as _),
