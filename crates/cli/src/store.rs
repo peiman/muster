@@ -147,37 +147,62 @@ pub fn load(dir: &Path) -> Result<Store, StoreError> {
     Ok(store)
 }
 
-fn write_entity<T: serde::Serialize>(
+/// Serialize one entity to a *temp* file `<sub>/<id>.json.tmp` (byte-identical to
+/// the final content), returning the `(temp, final)` pair to be renamed in the
+/// commit phase. A serialize or write failure here aborts before any live file is
+/// touched (#3 all-or-nothing).
+fn stage_entity<T: serde::Serialize>(
     dir: &Path,
     sub: &str,
     id: &str,
     value: &T,
-) -> Result<(), StoreError> {
-    let path = dir.join(sub).join(format!("{id}.json"));
+) -> Result<(PathBuf, PathBuf), StoreError> {
+    let final_path = dir.join(sub).join(format!("{id}.json"));
+    let temp_path = dir.join(sub).join(format!("{id}.json.tmp"));
     let text = serde_json::to_string_pretty(value).map_err(|source| StoreError::Parse {
-        path: path.display().to_string(),
+        path: final_path.display().to_string(),
         source,
     })?;
-    std::fs::write(&path, format!("{text}\n")).map_err(|e| io_err(&path, e))
+    std::fs::write(&temp_path, format!("{text}\n")).map_err(|e| io_err(&temp_path, e))?;
+    Ok((temp_path, final_path))
 }
 
 /// Persist every entity to its `<id>.json` (pretty, stable key order via the
-/// struct field order + BTreeMap iteration).
+/// struct field order + BTreeMap iteration). The write is **atomic** (#3): every
+/// entity is serialized to a `.json.tmp` first (any serialize/IO error aborts
+/// before a single live file is touched), then the temps are renamed into place,
+/// so a mid-write `ENOSPC`/interruption cannot tear a file or half-write the
+/// store. `load()` ignores non-`.json` files, so a temp is invisible to readers
+/// even between phases. (Per #4 this is temp+rename, not a cross-file transaction.)
 pub fn save(dir: &Path, store: &Store) -> Result<(), StoreError> {
-    save_map(dir, "processes", &store.processes)?;
-    save_map(dir, "controls", &store.controls)?;
-    save_map(dir, "incidents", &store.incidents)?;
-    save_map(dir, "nonconformities", &store.nonconformities)?;
+    // Phase 1: serialize + stage all entities to temp files.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let stage = stage_map(dir, "processes", &store.processes, &mut staged)
+        .and_then(|()| stage_map(dir, "controls", &store.controls, &mut staged))
+        .and_then(|()| stage_map(dir, "incidents", &store.incidents, &mut staged))
+        .and_then(|()| stage_map(dir, "nonconformities", &store.nonconformities, &mut staged));
+    if let Err(e) = stage {
+        // Best-effort cleanup of temps already written; no live file changed.
+        for (temp, _) in &staged {
+            let _ = std::fs::remove_file(temp);
+        }
+        return Err(e);
+    }
+    // Phase 2: commit — rename each temp into place (atomic per file).
+    for (temp, final_path) in &staged {
+        std::fs::rename(temp, final_path).map_err(|e| io_err(final_path, e))?;
+    }
     Ok(())
 }
 
-fn save_map<T: serde::Serialize>(
+fn stage_map<T: serde::Serialize>(
     dir: &Path,
     sub: &str,
     map: &BTreeMap<String, T>,
+    staged: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), StoreError> {
     for (id, value) in map {
-        write_entity(dir, sub, id, value)?;
+        staged.push(stage_entity(dir, sub, id, value)?);
     }
     Ok(())
 }

@@ -476,6 +476,40 @@ fn apply_refuses_a_dangling_intra_document_ref_leaving_store_unchanged() {
     assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
 }
 
+#[test]
+fn apply_leaves_no_temp_files_in_the_data_dir() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (manifest, _s1) = capture_state(&d, &tmp, "s1.json");
+
+    fs::remove_dir_all(&d).unwrap();
+    init(&d);
+    muster(&d)
+        .args(["apply", manifest.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // The atomic write (temp-then-rename) must leave NO staging files behind.
+    let mut leftovers = Vec::new();
+    for sub in ["processes", "controls", "incidents", "nonconformities"] {
+        let subdir = d.join(sub);
+        if let Ok(entries) = fs::read_dir(&subdir) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.ends_with(".tmp") {
+                    leftovers.push(name);
+                }
+            }
+        }
+    }
+    assert!(
+        leftovers.is_empty(),
+        "atomic save left stray temp files: {leftovers:?}"
+    );
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]
