@@ -510,6 +510,79 @@ fn apply_leaves_no_temp_files_in_the_data_dir() {
     );
 }
 
+#[test]
+fn apply_malformed_json_reports_the_not_valid_json_message() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let s1 = raw_json(&d, &["state"]);
+
+    let bad = tmp.path().join("malformed.json");
+    fs::write(&bad, "{ this is not json").unwrap();
+    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "malformed JSON must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not valid JSON"),
+        "malformed JSON must report the not-valid-JSON message: {err}"
+    );
+    assert_eq!(raw_json(&d, &["state"]), s1, "a failed apply mutated the store");
+}
+
+#[test]
+fn apply_wrong_shape_reports_the_store_shape_message() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    // Valid JSON, wrong shape (controls must be an array, not a number).
+    let bad = tmp.path().join("wrongshape.json");
+    fs::write(&bad, r#"{"controls": 5}"#).unwrap();
+    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "wrong-shape manifest must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("does not match the store shape"),
+        "wrong shape must report the store-shape message: {err}"
+    );
+}
+
+#[test]
+fn apply_missing_file_reports_the_read_error() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let missing = tmp.path().join("does-not-exist.json");
+    let out = muster(&d).args(["apply", missing.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "a missing manifest must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not read manifest"),
+        "missing file must report the read error: {err}"
+    );
+}
+
+#[test]
+fn apply_empty_object_manifest_is_accepted_and_changes_nothing() {
+    // Pinned behavior: an empty `{}` manifest parses as a v1 document with all
+    // categories empty; upsert prunes nothing (v3 is additive), so the store is
+    // left exactly as it was.
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let s1 = raw_json(&d, &["state"]);
+
+    let empty = tmp.path().join("empty.json");
+    fs::write(&empty, "{}").unwrap();
+    muster(&d).args(["apply", empty.to_str().unwrap()]).assert().success();
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "an empty manifest must leave the store unchanged (upsert prunes nothing)"
+    );
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]

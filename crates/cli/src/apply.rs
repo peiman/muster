@@ -15,11 +15,25 @@ use crate::store;
 use crate::view::WithNext;
 use domain::StoreDocument;
 use infrastructure::output::Output;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io;
 
 type Boxed = Result<(), Box<dyn std::error::Error>>;
+
+/// Typed envelope unwrap (#1). `state --output json` emits the CKSPEC envelope, so
+/// the manifest is either that envelope (take its `data`) or a bare store document.
+/// `Bare` is a catch-all `Value`, so this never swallows the wrong-shape error — we
+/// deliberately parse the inner `StoreDocument` as a separate final step to keep
+/// serde's `deny_unknown_fields` message (which names the offending field) intact.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Manifest {
+    /// The CKSPEC envelope: ignores `status`/`command`/`next`, takes `data`.
+    Enveloped { data: serde_json::Value },
+    /// A bare document (any JSON value).
+    Bare(serde_json::Value),
+}
 
 /// Per-category upsert counts — the success summary (dual-surface: JSON mirrors
 /// the human fields).
@@ -58,20 +72,20 @@ pub fn execute(args: ApplyArgs, output: &Output) -> Boxed {
             args.manifest
         )
     })?;
-    // Envelope unwrap: `state --output json` emits the CKSPEC envelope, so if the
-    // value is an object carrying both "command" and "data", take `.data`; else use
-    // it whole (a bare document is accepted too). This makes apply(state()) work
-    // against the literal bytes `state` emitted.
-    let doc_value = match &value {
-        serde_json::Value::Object(map)
-            if map.contains_key("command") && map.contains_key("data") =>
-        {
-            value
-                .get("data")
-                .cloned()
-                .expect("checked data key is present")
+    // Typed envelope unwrap (#1): take the envelope's `data`, else the bare value.
+    // `Bare` is a catch-all so this parse never fails; the wrong-shape / unknown-
+    // field error comes from the final `StoreDocument` parse below (preserving the
+    // serde message that names the offending field).
+    let doc_value = match serde_json::from_value::<Manifest>(value) {
+        Ok(Manifest::Enveloped { data }) => data,
+        Ok(Manifest::Bare(v)) => v,
+        Err(e) => {
+            return Err(format!(
+                "manifest '{}' does not match the store shape: {e} — it must be the document `muster state --output json` emits",
+                args.manifest
+            )
+            .into());
         }
-        _ => value,
     };
     let doc: StoreDocument = serde_json::from_value(doc_value).map_err(|e| {
         format!(
