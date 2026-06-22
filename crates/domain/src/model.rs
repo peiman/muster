@@ -437,6 +437,7 @@ pub struct Revision {
 
 /// A process: a node in a directed graph; a *hypothesis* about how work is done.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Process {
     pub id: String,
     pub name: String,
@@ -575,6 +576,7 @@ pub struct Implementation {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Control {
     pub id: String,
     pub title: String,
@@ -725,6 +727,7 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Incident {
     pub id: String,
     pub title: String,
@@ -759,6 +762,7 @@ impl fmt::Display for Incident {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Nonconformity {
     pub id: String,
     pub source: NonconformitySource,

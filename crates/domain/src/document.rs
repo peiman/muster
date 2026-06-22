@@ -23,6 +23,7 @@ fn default_schema_version() -> u32 {
 /// The entire store as one declarative document — every process, control,
 /// incident, and nonconformity. The shape `state` emits and `apply` consumes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StoreDocument {
     /// The on-disk schema version (#7). Declared first so `state` output leads
     /// with it deterministically; an unversioned manifest defaults to v1.

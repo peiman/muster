@@ -364,6 +364,36 @@ fn apply_accepts_an_unversioned_manifest_as_v1() {
     assert_eq!(doc["schema_version"], 1);
 }
 
+#[test]
+fn apply_refuses_an_unknown_field_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // A bogus key on a control entity must be an honest error, never a silent drop.
+    let unknown = tmp.path().join("unknown.json");
+    fs::write(
+        &unknown,
+        r#"{"controls":[{"id":"c1","title":"C","applicable":true,"status":"not_started","evidence":[],"bogus_unknown_field":true}]}"#,
+    )
+    .unwrap();
+    let out = muster(&d)
+        .args(["apply", unknown.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply of an unknown-field manifest must fail-closed"
+    );
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused unknown-field apply mutated the store"
+    );
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]
