@@ -11,13 +11,23 @@
 //! a manifest that omits an empty category readable.
 
 use crate::model::{Control, Incident, Nonconformity, Process};
-use crate::store::Store;
+use crate::store::{SCHEMA_VERSION, Store};
 use serde::{Deserialize, Serialize};
+
+/// The serde default for `schema_version`: an unversioned (legacy) manifest is
+/// read as v1 (#7 SSOT — one schema number, reused from `domain::SCHEMA_VERSION`).
+fn default_schema_version() -> u32 {
+    SCHEMA_VERSION
+}
 
 /// The entire store as one declarative document — every process, control,
 /// incident, and nonconformity. The shape `state` emits and `apply` consumes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoreDocument {
+    /// The on-disk schema version (#7). Declared first so `state` output leads
+    /// with it deterministically; an unversioned manifest defaults to v1.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     #[serde(default)]
     pub processes: Vec<Process>,
     #[serde(default)]
@@ -28,12 +38,27 @@ pub struct StoreDocument {
     pub nonconformities: Vec<Nonconformity>,
 }
 
+impl Default for StoreDocument {
+    /// Hand-written (not derived) so an empty document still carries the current
+    /// `SCHEMA_VERSION` — a derived `Default` would wrongly stamp `0`.
+    fn default() -> Self {
+        StoreDocument {
+            schema_version: SCHEMA_VERSION,
+            processes: Vec::new(),
+            controls: Vec::new(),
+            incidents: Vec::new(),
+            nonconformities: Vec::new(),
+        }
+    }
+}
+
 impl From<&Store> for StoreDocument {
     /// Serialize the whole store (the `state` direction). id-sorted (the source
     /// `BTreeMap`s already are), deterministic, with NO ref re-resolution and NO
     /// mutation — `state` is structurally read-only.
     fn from(s: &Store) -> Self {
         StoreDocument {
+            schema_version: SCHEMA_VERSION,
             processes: s.processes.values().cloned().collect(),
             controls: s.controls.values().cloned().collect(),
             incidents: s.incidents.values().cloned().collect(),
@@ -156,5 +181,19 @@ mod tests {
         assert!(doc.controls.is_empty());
         assert!(doc.incidents.is_empty());
         assert!(doc.nonconformities.is_empty());
+        // An unversioned manifest defaults to v1 (#7 SSOT, forward-protection).
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn from_store_stamps_the_schema_version() {
+        let doc = StoreDocument::from(&seeded());
+        assert_eq!(doc.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn default_carries_schema_version_not_zero() {
+        // A hand-written Default must set the version (a derived Default would yield 0).
+        assert_eq!(StoreDocument::default().schema_version, SCHEMA_VERSION);
     }
 }

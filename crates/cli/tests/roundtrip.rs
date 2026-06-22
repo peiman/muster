@@ -123,6 +123,17 @@ fn state_emits_every_entity_as_one_document() {
 }
 
 #[test]
+fn state_emits_schema_version() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+
+    let doc = data(&d, &["state"]);
+    assert_eq!(doc["schema_version"], 1, "state must emit schema_version");
+}
+
+#[test]
 fn state_is_read_only_and_deterministic() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
