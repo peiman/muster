@@ -95,9 +95,12 @@ pub fn execute(args: ApplyArgs, output: &Output) -> Boxed {
     let mut merged = store::load(&dir)?;
     doc.upsert_into(&mut merged);
 
-    // 3. Fail-closed ref validation BEFORE any persist (#9). Because validation
-    //    completes fully here and step 4 is the only writer, a refused manifest
-    //    leaves the on-disk store byte-for-byte untouched (structural all-or-nothing).
+    // 3. Fail-closed validation of the FULL matrix BEFORE any persist (#9):
+    //    domain-pure id integrity + intra-document refs, then live ref resolution.
+    //    Because validation completes fully here and step 4 is the only writer, a
+    //    refused manifest leaves the on-disk store byte-for-byte untouched
+    //    (structural all-or-nothing).
+    doc.validate(&merged)?;
     resolve::validate_store_refs(&merged)?;
 
     // 4. Branch on --dry-run.

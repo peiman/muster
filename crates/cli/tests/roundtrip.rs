@@ -394,6 +394,88 @@ fn apply_refuses_an_unknown_field_leaving_store_unchanged() {
     );
 }
 
+#[test]
+fn apply_refuses_a_duplicate_id_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    let fix = write_fixture(&tmp);
+    seed(&d, &fix);
+    let (_m, s1) = capture_state(&d, &tmp, "s1.json");
+
+    // Two controls share an id — last-write-wins is silent corruption, refuse it.
+    let dup = tmp.path().join("dup.json");
+    fs::write(
+        &dup,
+        r#"{"controls":[
+          {"id":"c1","title":"A","applicable":true,"status":"not_started","evidence":[]},
+          {"id":"c1","title":"B","applicable":true,"status":"not_started","evidence":[]}
+        ]}"#,
+    )
+    .unwrap();
+    let out = muster(&d)
+        .args(["apply", dup.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "duplicate-id apply must fail-closed");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("c1"), "error must name the duplicate id: {err}");
+    assert_eq!(
+        raw_json(&d, &["state"]),
+        s1,
+        "a refused duplicate-id apply mutated the store"
+    );
+}
+
+#[test]
+fn apply_refuses_an_invalid_slug_id_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let s1 = raw_json(&d, &["state"]);
+
+    let bad = tmp.path().join("badslug.json");
+    fs::write(
+        &bad,
+        r#"{"controls":[{"id":"Bad Id","title":"C","applicable":true,"status":"not_started","evidence":[]}]}"#,
+    )
+    .unwrap();
+    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    assert!(!out.status.success(), "invalid-slug apply must fail-closed");
+    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+}
+
+#[test]
+fn apply_refuses_a_dangling_intra_document_ref_leaving_store_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let s1 = raw_json(&d, &["state"]);
+
+    // A process links a control present in neither the manifest nor the store.
+    let bad = tmp.path().join("dangling.json");
+    fs::write(
+        &bad,
+        r#"{"processes":[{"id":"p1","name":"P","status":"proposed","controls":["ghost"]}]}"#,
+    )
+    .unwrap();
+    let out = muster(&d).args(["apply", bad.to_str().unwrap()]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "dangling intra-doc ref apply must fail-closed"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("ghost"), "error must name the dangling id: {err}");
+    assert_eq!(raw_json(&d, &["state"]), s1, "a refused apply mutated the store");
+}
+
 // ── SC-7 — discoverability (explain + catalog list both verbs) ─────────────────
 
 #[test]
