@@ -27,7 +27,7 @@ const ENV_CMD_CACHE: &str = "MUSTER_CMD_CACHE";
 /// Default UNSET ⇒ `None` ⇒ no source-age gating (today's behavior, b2).
 const ENV_SOURCE_FRESHNESS: &str = "MUSTER_SOURCE_FRESHNESS_SECS";
 const MANIFEST: &str = "manifest.json";
-const SCHEMA_VERSION: u32 = 1;
+use domain::SCHEMA_VERSION;
 
 const SUBDIRS: [(&str, EntityKind); 4] = [
     ("processes", EntityKind::Process),

@@ -11,6 +11,12 @@ use crate::reference::{Ref, Resolution};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// The on-disk schema version — the single source of truth (#7). One number flows
+/// in and out: the cli store layer stamps it into `manifest.json` at `init`, and
+/// `StoreDocument` carries it so `state` emits it and `apply` can refuse a manifest
+/// from a newer binary rather than silently misparsing it.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// The whole management system, in memory. Persisted file-per-entity by the cli
 /// layer (the disk boundary lives there, not here — #8).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -791,6 +797,13 @@ impl TreeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_version_is_the_one_schema_number() {
+        // SSOT (#7): the single on-disk schema version lives here in the domain and
+        // is reused by both the manifest stamp (cli) and `StoreDocument`.
+        assert_eq!(SCHEMA_VERSION, 1);
+    }
 
     fn store_with(ids: &[&str]) -> Store {
         let mut s = Store::default();

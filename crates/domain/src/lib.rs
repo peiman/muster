@@ -22,4 +22,4 @@ pub use reference::{
     Comparator, Derived, Expectation, Outcome, Ref, Resolution, drift_profile, is_stale,
     value_to_outcome, value_to_outcome_with_expect,
 };
-pub use store::{Store, SubNode, TreeStep, TreeView};
+pub use store::{SCHEMA_VERSION, Store, SubNode, TreeStep, TreeView};
