@@ -9,9 +9,10 @@
 //! exists** (#3 honest signals).
 
 use crate::model::{
-    ControlStatus, Evidence, EvidenceVerdict, IncidentStatus, NonconformityStatus, ProcessStatus,
+    Check, ControlStatus, Evidence, EvidenceVerdict, IncidentStatus, NonconformityStatus,
+    ProcessStatus,
 };
-use crate::reference::Derived;
+use crate::reference::{Derived, Outcome};
 use crate::store::Store;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,8 +125,8 @@ pub fn readiness(store: &Store, scope: Option<&str>) -> Readiness {
 /// `process_evidence_index` maps a process id to its honest `EvidenceVerdict`
 /// (built by the cli the same way as `evidence_index`, injecting the fs oracle).
 /// It gates the proven/asserted split exactly as `evidence_index` gates control
-/// coverage: a process is `proven` only when its verdict is `Verified` (a `file`
-/// resolves / a `url` is well-formed) AND nothing refutes it. A process absent
+/// coverage: a process is `proven` only when its verdict is `Verified` (currently
+/// a `file` resolves) AND nothing refutes it. A process absent
 /// from this index falls back to the kind-only `has_verifying_evidence` path (the
 /// v0 / domain-unit-test behavior), mirroring the control evidence fallback.
 ///
@@ -139,6 +140,32 @@ pub fn readiness_with(
     store: &Store,
     scope: Option<&str>,
     index: &BTreeMap<String, Derived>,
+    evidence_index: &BTreeMap<String, EvidenceVerdict>,
+    process_evidence_index: &BTreeMap<String, EvidenceVerdict>,
+    source_freshness_secs: Option<i64>,
+) -> Readiness {
+    readiness_with_checks(
+        store,
+        scope,
+        index,
+        &BTreeMap::new(),
+        evidence_index,
+        process_evidence_index,
+        source_freshness_secs,
+    )
+}
+
+/// Like [`readiness_with`], plus the honest projection of each ref-backed process
+/// check keyed as `<process-id>/<check-id>`. Checks are gates: a live `Pass` is
+/// neutral, a live `Fail` is a refuting signal, and unresolved/stale/asserted/
+/// cache-served/unknown projections are gap findings. That keeps an authoritative
+/// check ref from becoming green merely because its failing evidence flattened to
+/// `unknown`.
+pub fn readiness_with_checks(
+    store: &Store,
+    scope: Option<&str>,
+    index: &BTreeMap<String, Derived>,
+    check_index: &BTreeMap<String, Derived>,
     evidence_index: &BTreeMap<String, EvidenceVerdict>,
     process_evidence_index: &BTreeMap<String, EvidenceVerdict>,
     source_freshness_secs: Option<i64>,
@@ -158,17 +185,20 @@ pub fn readiness_with(
     );
     let controls = controls_split(store, scope, &in_scope, index);
     let (proven, asserted) = proven_vs_asserted(store, &in_scope, process_evidence_index);
-    let refuting_signals = refuting_signals(store, &in_scope);
+    let refuting_signals = refuting_signals(store, &in_scope, check_index);
     let enforcement = enforcement(store, &in_scope);
     let cycles = scoped_cycles(store, scope, &in_scope);
     let gap_findings = gap_findings(
         store,
         scope,
         &in_scope,
-        &cycles,
-        index,
-        evidence_index,
-        source_freshness_secs,
+        GapInputs {
+            cycles: &cycles,
+            control_index: index,
+            check_index,
+            evidence_index,
+            source_freshness_secs,
+        },
     );
 
     // Full coverage via exact integer equality (no float comparison): every
@@ -289,8 +319,10 @@ fn control_coverage(
         // A ref-backed control's resolution IS its evidence (#7): it counts as
         // covered only when freshly Derived + Pass. An asserted control follows
         // the v0 rule (status Implemented + attached evidence).
-        if is_derived(index, id) {
-            let d = index.get(id).expect("is_derived ⇒ present");
+        let source_projected = index.get(id).filter(|d| {
+            !matches!(d, Derived::Asserted) || c.is_ref_backed() || !c.implementations.is_empty()
+        });
+        if let Some(d) = source_projected {
             // Stale-by-source: a live, passing file_anchor whose pointed-at
             // artifact is older than the (opt-in) source-freshness bound is NOT
             // fresh coverage — the verdict is live but derives from an
@@ -316,8 +348,8 @@ fn control_coverage(
         // prove coverage; at least one *verifying* artifact (file/url) is required
         // (#1, symmetric with a note ref → Asserted, never green). honor-VERIFIED
         // (b1): when the cli supplied an `EvidenceVerdict`, a verifying artifact
-        // counts ONLY if it RESOLVES (a `file` exists / a `url` is well-formed) —
-        // a named-but-missing artifact is no better than a note. Absent from the
+        // counts ONLY if it RESOLVES (currently, a `file` exists; URL syntax
+        // alone is not proof) — a named-but-missing artifact is no better than a note. Absent from the
         // index ⇒ fall back to kind-only (the v0 / domain-unit-test path).
         let covered = match evidence_index.get(id) {
             Some(v) => c.status == ControlStatus::Implemented && *v == EvidenceVerdict::Verified,
@@ -380,8 +412,8 @@ fn proven_vs_asserted(
         // proven requires a verifying artifact (file/url), not just "trust me".
         // honor-VERIFIED (mirrors control coverage at `control_coverage`): when the
         // cli supplied an `EvidenceVerdict`, the artifact counts ONLY if it RESOLVES
-        // (a `file` exists / a `url` is well-formed) — a named-but-missing artifact
-        // is no better than a note. Absent from the index ⇒ fall back to kind-only
+        // (currently, a `file` exists; URL syntax alone is not proof) — a
+        // named-but-missing artifact is no better than a note. Absent from the index ⇒ fall back to kind-only
         // (the v0 / domain-unit-test path).
         let has_verifying = match process_evidence_index.get(pid) {
             Some(v) => *v == EvidenceVerdict::Verified,
@@ -408,7 +440,11 @@ fn proven_vs_asserted(
     (proven, asserted)
 }
 
-fn refuting_signals(store: &Store, in_scope: &BTreeSet<String>) -> Vec<RefutingSignal> {
+fn refuting_signals(
+    store: &Store,
+    in_scope: &BTreeSet<String>,
+    check_index: &BTreeMap<String, Derived>,
+) -> Vec<RefutingSignal> {
     let mut out = Vec::new();
     for pid in in_scope {
         // open incidents
@@ -432,7 +468,11 @@ fn refuting_signals(store: &Store, in_scope: &BTreeSet<String>) -> Vec<RefutingS
         // failed checks
         if let Some(p) = store.processes.get(pid) {
             for c in &p.checks {
-                if c.last_result == crate::model::CheckResult::Fail {
+                let live_fail = check_index
+                    .get(&check_key(pid, &c.id))
+                    .is_some_and(|d| matches!(d.outcome(), Outcome::Fail));
+                let stored_fail = c.last_result == crate::model::CheckResult::Fail;
+                if live_fail || stored_fail {
                     out.push(RefutingSignal {
                         process_id: pid.clone(),
                         source: format!("failed check {}", c.id),
@@ -562,14 +602,92 @@ fn derived_gap_reason(d: &Derived) -> String {
     }
 }
 
+fn check_key(process_id: &str, check_id: &str) -> String {
+    format!("{process_id}/{check_id}")
+}
+
+fn check_ref_gap(process_id: &str, check: &Check, derived: Option<&Derived>) -> Option<GapFinding> {
+    if !check.is_ref_backed() {
+        return None;
+    }
+    let subject_id = check_key(process_id, &check.id);
+    let finding = |kind: &str, message: String| GapFinding {
+        kind: kind.to_string(),
+        subject_id: subject_id.clone(),
+        message,
+    };
+    match derived {
+        Some(Derived::Derived {
+            outcome: Outcome::Pass,
+            served_from_cache: false,
+            ..
+        }) => None,
+        Some(Derived::Derived {
+            outcome: Outcome::Pass,
+            served_from_cache: true,
+            ..
+        }) => Some(finding(
+            "check_ref_cached",
+            format!(
+                "process '{process_id}' check '{}' passed from a cached ref verdict — re-resolve live before trusting readiness",
+                check.id
+            ),
+        )),
+        Some(Derived::Derived {
+            outcome: Outcome::Fail,
+            ..
+        }) => None,
+        Some(Derived::Derived { value, .. }) => Some(finding(
+            "check_ref_unknown",
+            format!(
+                "process '{process_id}' check '{}' resolved to a non-passing value ({value}) — fix the source or add an explicit expectation",
+                check.id
+            ),
+        )),
+        Some(Derived::Stale { resolved_ts, .. }) => Some(finding(
+            "check_ref_stale",
+            format!(
+                "process '{process_id}' check '{}' has a stale ref resolution (resolved {resolved_ts}) — re-resolve before trusting readiness",
+                check.id
+            ),
+        )),
+        Some(Derived::Unresolved { reason }) => Some(finding(
+            "check_ref_unresolved",
+            format!(
+                "process '{process_id}' check '{}' has a dangling ref — {reason}; fix the source or re-point the check",
+                check.id
+            ),
+        )),
+        Some(Derived::Asserted) => Some(finding(
+            "check_ref_asserted",
+            format!(
+                "process '{process_id}' check '{}' is asserted, not derived from a passing source",
+                check.id
+            ),
+        )),
+        None => Some(finding(
+            "check_ref_unresolved",
+            format!(
+                "process '{process_id}' check '{}' has no resolved ref projection — resolve or fix the source before trusting readiness",
+                check.id
+            ),
+        )),
+    }
+}
+
+struct GapInputs<'a> {
+    cycles: &'a [Vec<String>],
+    control_index: &'a BTreeMap<String, Derived>,
+    check_index: &'a BTreeMap<String, Derived>,
+    evidence_index: &'a BTreeMap<String, EvidenceVerdict>,
+    source_freshness_secs: Option<i64>,
+}
+
 fn gap_findings(
     store: &Store,
     scope: Option<&str>,
     in_scope: &BTreeSet<String>,
-    cycles: &[Vec<String>],
-    index: &BTreeMap<String, Derived>,
-    evidence_index: &BTreeMap<String, EvidenceVerdict>,
-    source_freshness_secs: Option<i64>,
+    inputs: GapInputs<'_>,
 ) -> Vec<GapFinding> {
     let mut out = Vec::new();
     // Reference gaps (v1): a ref that can't be followed (unresolved), a cache
@@ -579,7 +697,7 @@ fn gap_findings(
         if !(scope.is_none() || applicable_in_scope(store, scope, in_scope, &c.id)) {
             continue;
         }
-        match index.get(&c.id) {
+        match inputs.control_index.get(&c.id) {
             Some(Derived::Unresolved { reason }) => out.push(GapFinding {
                 kind: "ref_unresolved".into(),
                 subject_id: c.id.clone(),
@@ -614,9 +732,10 @@ fn gap_findings(
         // is older than the opt-in bound — the verdict is live but the file is
         // un-regenerated. Independent of the match above (only fires on an
         // otherwise-green projection). `None` bound ⇒ never fires.
-        if let Some(d) = index
+        if let Some(d) = inputs
+            .control_index
             .get(&c.id)
-            .filter(|d| d.is_green_eligible() && d.source_is_stale(source_freshness_secs))
+            .filter(|d| d.is_green_eligible() && d.source_is_stale(inputs.source_freshness_secs))
         {
             out.push(GapFinding {
                 kind: "ref_source_stale".into(),
@@ -660,6 +779,15 @@ fn gap_findings(
                 message: format!("active process '{pid}' has no controls — link: muster process link-control {pid} <control-id>"),
             });
         }
+        for check in &p.checks {
+            if let Some(gap) = check_ref_gap(
+                pid,
+                check,
+                inputs.check_index.get(&check_key(pid, &check.id)),
+            ) {
+                out.push(gap);
+            }
+        }
     }
     // Controls implemented but with no — only honor-level — or non-resolving
     // evidence (in scope). The three are mutually exclusive per control:
@@ -675,7 +803,7 @@ fn gap_findings(
         if c.status != ControlStatus::Implemented || !scoped_control(&c.id) {
             continue;
         }
-        match evidence_index.get(&c.id) {
+        match inputs.evidence_index.get(&c.id) {
             Some(EvidenceVerdict::Verified) => {}
             Some(EvidenceVerdict::Empty) => out.push(control_no_evidence_finding(&c.id)),
             Some(EvidenceVerdict::NoteOnly) => out.push(control_honor_evidence_finding(&c.id)),
@@ -716,7 +844,7 @@ fn gap_findings(
         }
     }
     // Each cycle is a finding.
-    for cyc in cycles {
+    for cyc in inputs.cycles {
         out.push(GapFinding {
             kind: "cycle".into(),
             subject_id: cyc.join(" -> "),

@@ -102,8 +102,8 @@ pub(crate) fn render_for_store(
     let mut index: BTreeMap<String, Derived> = BTreeMap::new();
     // honor-VERIFIED (b1, default-on): a `file` evidence counts only if the path
     // RESOLVES to an existing file (cwd-relative at read time, like `--ref-file`);
-    // a `url` only if well-formed (FORMAT only — v1 is NO-NETWORK). The cli owns
-    // the fs boundary (#8): it injects `Path::is_file` into the pure
+    // URL syntax alone is not a reachability/content check, so it does not prove
+    // coverage. The cli owns the fs boundary (#8): it injects `Path::is_file` into the pure
     // `domain::verify_evidence`, which is `false` for a missing path AND a dir.
     let mut evidence_index: BTreeMap<String, EvidenceVerdict> = BTreeMap::new();
     let mut drift_profiles: Vec<DriftProfileEntry> = Vec::new();
@@ -152,8 +152,10 @@ pub(crate) fn render_for_store(
     // Deterministic ordering (id-sorted).
     drift_profiles.sort_by(|a, b| a.id.cmp(&b.id));
 
-    // Bake derived check results into the store so the existing refuting-signal /
-    // failed-check logic sees the honest (resolved) outcome, not the stored one.
+    // Bake derived check results into the store and keep the richer projection so
+    // readiness can gate unresolved/stale/asserted/cache-served check refs instead
+    // of flattening them all to `unknown`.
+    let mut check_index: BTreeMap<String, Derived> = BTreeMap::new();
     for p in s.processes.values_mut() {
         for check in &mut p.checks {
             if check.is_ref_backed() {
@@ -165,14 +167,15 @@ pub(crate) fn render_for_store(
                     cmd_cache,
                 );
                 check.last_result = check.effective_result(Some(&d));
+                check_index.insert(format!("{}/{}", p.id, check.id), d);
             }
         }
     }
 
     // honor-VERIFIED for the proven/asserted split (mirrors the control
     // `evidence_index` loop above): a process's verifying artifact counts toward
-    // `proven` only if it RESOLVES (a `file` exists / a `url` is well-formed). The
-    // cli owns the fs boundary (#8): inject `Path::is_file` into the pure
+    // `proven` only if it RESOLVES (currently, a `file` exists; URL syntax alone
+    // does not prove coverage). The cli owns the fs boundary (#8): inject `Path::is_file` into the pure
     // `domain::verify_evidence` (SSOT — same helper as control coverage).
     let mut process_evidence_index: BTreeMap<String, EvidenceVerdict> = BTreeMap::new();
     for p in s.processes.values() {
@@ -182,10 +185,11 @@ pub(crate) fn render_for_store(
         );
     }
 
-    let result = domain::readiness_with(
+    let result = domain::readiness_with_checks(
         &s,
         process,
         &index,
+        &check_index,
         &evidence_index,
         &process_evidence_index,
         store::source_freshness_secs(),

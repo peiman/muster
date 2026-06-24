@@ -16,24 +16,40 @@ use crate::store;
 use crate::view::WithNext;
 use domain::StoreDocument;
 use infrastructure::output::Output;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fmt;
 use std::io;
 
 type Boxed = Result<(), Box<dyn std::error::Error>>;
 
-/// Typed envelope unwrap (#1). `state --output json` emits the CKSPEC envelope, so
-/// the manifest is either that envelope (take its `data`) or a bare store document.
-/// `Bare` is a catch-all `Value`, so this never swallows the wrong-shape error — we
-/// deliberately parse the inner `StoreDocument` as a separate final step to keep
-/// serde's `deny_unknown_fields` message (which names the offending field) intact.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Manifest {
-    /// The CKSPEC envelope: ignores `status`/`command`/`next`, takes `data`.
-    Enveloped { data: serde_json::Value },
-    /// A bare document (any JSON value).
-    Bare(serde_json::Value),
+const STORE_FIELDS: &[&str] = &[
+    "schema_version",
+    "processes",
+    "controls",
+    "incidents",
+    "nonconformities",
+];
+
+/// Unwrap exactly the JSON envelope emitted by `state --output json`, otherwise
+/// leave a bare store document intact. A top-level `data` key beside store fields
+/// is ambiguous and rejected; accepting it as an envelope would silently discard
+/// siblings such as `controls`.
+fn manifest_document_value(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    let serde_json::Value::Object(map) = &value else {
+        return Ok(value);
+    };
+    let has_data = map.contains_key("data");
+    let has_store_field = STORE_FIELDS.iter().any(|field| map.contains_key(*field));
+    if has_data && has_store_field {
+        return Err(
+            "ambiguous manifest: top-level `data` appears beside store fields; pass either the full `state --output json` envelope or a bare store document, not both"
+                .to_string(),
+        );
+    }
+    if has_data && map.contains_key("status") {
+        return Ok(map.get("data").expect("checked contains_key").clone());
+    }
+    Ok(value)
 }
 
 /// Per-category upsert counts — the success summary (dual-surface: JSON mirrors
@@ -73,21 +89,15 @@ pub fn execute(args: ApplyArgs, output: &Output) -> Boxed {
             args.manifest
         )
     })?;
-    // Typed envelope unwrap (#1): take the envelope's `data`, else the bare value.
-    // `Bare` is a catch-all so this parse never fails; the wrong-shape / unknown-
-    // field error comes from the final `StoreDocument` parse below (preserving the
-    // serde message that names the offending field).
-    let doc_value = match serde_json::from_value::<Manifest>(value) {
-        Ok(Manifest::Enveloped { data }) => data,
-        Ok(Manifest::Bare(v)) => v,
-        Err(e) => {
-            return Err(format!(
-                "manifest '{}' does not match the store shape: {e} — it must be the document `muster state --output json` emits",
-                args.manifest
-            )
-            .into());
-        }
-    };
+    // Envelope unwrap (#1): take the CKSPEC envelope's `data`, else the bare value.
+    // The final `StoreDocument` parse below still owns wrong-shape / unknown-field
+    // errors so serde can name the offending field.
+    let doc_value = manifest_document_value(value).map_err(|e| {
+        format!(
+            "manifest '{}' does not match the store shape: {e} — it must be the document `muster state --output json` emits",
+            args.manifest
+        )
+    })?;
     let doc: StoreDocument = serde_json::from_value(doc_value).map_err(|e| {
         format!(
             "manifest '{}' does not match the store shape: {e} — it must be the document `muster state --output json` emits",
@@ -113,8 +123,8 @@ pub fn execute(args: ApplyArgs, output: &Output) -> Boxed {
     // 3. Fail-closed validation of the FULL matrix BEFORE any persist (#9):
     //    domain-pure id integrity + intra-document refs, then live ref resolution.
     //    Because validation completes fully here and step 4 is the only writer, a
-    //    refused manifest leaves the on-disk store byte-for-byte untouched
-    //    (structural all-or-nothing).
+    //    refused manifest leaves the on-disk store byte-for-byte untouched. The
+    //    later save is per-file atomic, not a cross-file transaction.
     doc.validate(&merged)?;
     resolve::validate_store_refs(&merged)?;
 

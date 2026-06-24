@@ -209,8 +209,9 @@ fn derived_from(
 /// file / spawn failure / malformed shape) refuses the WHOLE manifest, naming the
 /// offending entity id and the fix. A `command` ref's non-zero *exit* is a
 /// legitimate fail, not an apply error — only an outright `Unresolved` refuses.
-/// Returning `Err` BEFORE the caller persists makes a refused apply structurally
-/// all-or-nothing: the on-disk store is never half-written.
+/// Returning `Err` BEFORE the caller persists makes a validation refusal leave
+/// the on-disk store untouched. The later save path is per-file atomic, not a
+/// cross-file transaction.
 pub fn validate_store_refs(s: &domain::Store) -> Result<(), String> {
     let now = store::now_iso();
     for c in s.controls.values() {

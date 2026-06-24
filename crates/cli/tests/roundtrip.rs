@@ -279,11 +279,11 @@ fn apply_fails_closed_on_dangling_anchor_leaving_store_unchanged() {
         err.contains("cov-bar"),
         "error must name the control: {err}"
     );
-    // The store was left exactly as it was (all-or-nothing).
+    // Validation refused the manifest before save, so the store is unchanged.
     assert_eq!(
         raw_json(&d, &["state"]),
         s1,
-        "a failed apply mutated the store (not all-or-nothing)"
+        "a validation-refused apply mutated the store"
     );
 }
 
@@ -303,6 +303,41 @@ fn apply_accepts_a_bare_document_without_the_envelope() {
         .args(["apply", bare.to_str().unwrap()])
         .assert()
         .success();
+}
+
+#[test]
+fn apply_rejects_ambiguous_data_key_in_bare_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    let ambiguous = tmp.path().join("ambiguous.json");
+    fs::write(
+        &ambiguous,
+        r#"{
+          "data": {"processes": []},
+          "controls": [
+            {"id":"red-control","title":"Red","applicable":true,"status":"not_started","evidence":[]}
+          ]
+        }"#,
+    )
+    .unwrap();
+
+    let out = muster(&d)
+        .args(["apply", ambiguous.to_str().unwrap()])
+        .output()
+        .unwrap();
+    if out.status.success() {
+        let doc = data(&d, &["state"]);
+        assert!(
+            doc["controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["id"] == "red-control"),
+            "apply succeeded but silently dropped the top-level controls: {doc}"
+        );
+    }
 }
 
 #[test]
@@ -428,6 +463,90 @@ fn apply_refuses_an_unknown_field_nested_in_an_entity_leaving_store_unchanged() 
         raw_json(&d, &["state"]),
         s1,
         "a refused nested-unknown-field apply mutated the store"
+    );
+}
+
+fn assert_apply_refuses_json_manifest(dir: &Path, tmp: &TempDir, name: &str, manifest: Value) {
+    let s1 = raw_json(dir, &["state"]);
+    let path = tmp.path().join(name);
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let out = muster(dir)
+        .args(["apply", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "apply of {name} must fail-closed instead of silently dropping unknown nested fields"
+    );
+    assert_eq!(
+        raw_json(dir, &["state"]),
+        s1,
+        "a refused nested unknown-field apply mutated the store"
+    );
+}
+
+#[test]
+fn apply_refuses_unknown_fields_nested_in_refs_expectations_and_resolutions() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    assert_apply_refuses_json_manifest(
+        &d,
+        &tmp,
+        "ref-unknown.json",
+        serde_json::json!({
+            "controls": [{
+                "id": "ref-unknown",
+                "title": "C",
+                "applicable": true,
+                "status": "not_started",
+                "evidence": [],
+                "ref": {"kind": "note", "text": "x", "bogus_ref_field": true}
+            }]
+        }),
+    );
+
+    let fixture = write_fixture(&tmp);
+    assert_apply_refuses_json_manifest(
+        &d,
+        &tmp,
+        "expect-unknown.json",
+        serde_json::json!({
+            "controls": [{
+                "id": "expect-unknown",
+                "title": "C",
+                "applicable": true,
+                "status": "not_started",
+                "evidence": [],
+                "ref": {
+                    "kind": "file_anchor",
+                    "path": fixture,
+                    "anchor": "coverage.percent",
+                    "expect": {"op": "ge", "threshold": 80.0, "bogus_expect_field": true}
+                }
+            }]
+        }),
+    );
+
+    assert_apply_refuses_json_manifest(
+        &d,
+        &tmp,
+        "resolution-unknown.json",
+        serde_json::json!({
+            "controls": [{
+                "id": "resolution-unknown",
+                "title": "C",
+                "applicable": true,
+                "status": "not_started",
+                "evidence": [],
+                "resolved": {
+                    "state": "unresolved",
+                    "reason": "missing",
+                    "bogus_resolution_field": true
+                }
+            }]
+        }),
     );
 }
 

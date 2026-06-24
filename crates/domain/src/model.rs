@@ -237,7 +237,8 @@ impl EvidenceKind {
     /// assertion). The honesty seam (#1): a note alone never proves coverage,
     /// symmetric with how a note *ref* projects to `Asserted` and is never
     /// green-eligible. `readiness` requires at least one verifying evidence
-    /// before counting a hand-set control as implemented-with-evidence.
+    /// before counting a hand-set control as implemented-with-evidence. A URL is
+    /// only green-eligible when some resolver verifies it; syntax alone is not proof.
     pub fn is_verifying(&self) -> bool {
         matches!(self, EvidenceKind::File | EvidenceKind::Url)
     }
@@ -255,9 +256,10 @@ pub struct Evidence {
     pub value: String,
 }
 
-/// `true` when at least one attached evidence is *verifying* (a file/url
-/// artifact), not merely an honor-level note. The SSOT predicate `readiness`
-/// uses to keep a note-only claim off the READY headline (#1). Empty ⇒ false.
+/// `true` when at least one attached evidence is a verifying-kind artifact
+/// (file/url), not merely an honor-level note. The CLI still has to resolve that
+/// artifact before it can prove coverage; kind alone is only the v0 fallback.
+/// Empty ⇒ false.
 pub fn has_verifying_evidence(evidence: &[Evidence]) -> bool {
     evidence.iter().any(|e| e.kind.is_verifying())
 }
@@ -286,7 +288,8 @@ pub fn is_well_formed_url(value: &str) -> bool {
 /// The honest verifying verdict for an evidence list, given a file-existence
 /// ORACLE supplied by the caller (the cli passes `Path::is_file`; the domain
 /// invokes the closure but does no fs itself, keeping #8). URL format is checked
-/// purely. Returns `Verified` on the FIRST evidence whose artifact resolves; else
+/// only to produce a better error; it never verifies existence/content. Returns
+/// `Verified` on the FIRST evidence whose artifact resolves; else
 /// `Empty` (no evidence), `NoteOnly` (only honor-level notes), or `Unresolved`
 /// naming the FIRST verifying-kind (file/url) item that did not resolve so the
 /// readiness layer can name the offender + the fix (#3 honest signals).
@@ -307,7 +310,7 @@ pub fn verify_evidence(
             }
             EvidenceKind::Url => {
                 saw_verifying_kind = true;
-                is_well_formed_url(&e.value)
+                false
             }
             EvidenceKind::Note => false,
         };
@@ -317,6 +320,9 @@ pub fn verify_evidence(
         if e.kind.is_verifying() && first_unresolved.is_none() {
             let reason = match e.kind {
                 EvidenceKind::File => "missing or not a regular file (paths resolve relative to the current directory)".to_string(),
+                EvidenceKind::Url if is_well_formed_url(&e.value) => {
+                    "url evidence is format-only in offline mode — attach a file artifact or a resolver-backed ref instead".to_string()
+                }
                 EvidenceKind::Url => "malformed url — needs an http(s):// scheme and a host".to_string(),
                 EvidenceKind::Note => unreachable!("note is not a verifying kind"),
             };
@@ -340,7 +346,7 @@ pub fn verify_evidence(
 /// from that index fall back to the kind-only `has_verifying_evidence`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum EvidenceVerdict {
-    /// ≥1 verifying artifact resolves (an existing file or a well-formed url).
+    /// ≥1 verifying artifact resolves (currently an existing file).
     Verified,
     /// Has a verifying-kind evidence (file/url) but NONE resolve — names the
     /// first offender + a human reason so readiness can guide the fix.
@@ -634,14 +640,19 @@ impl Control {
         if !self.is_ref_backed() && self.implementations.is_empty() {
             return self.status;
         }
-        // A projection blocks green when its source is Fail/Unresolved/Stale (or a
-        // declared ref that produced no resolution at all). A title-only `Derived`
-        // (Unknown outcome) neither blocks nor proves.
-        let blocks = |d: &Derived| {
+        // The control's own ref can be title-like (`Unknown`): it neither blocks
+        // nor proves. Implementations are stricter: every declared implementation
+        // must be a live derived pass, because each one is a required proof point.
+        let own_blocks = |d: &Derived| {
             matches!(
                 d,
                 Derived::Unresolved { .. }
                     | Derived::Stale { .. }
+                    | Derived::Asserted
+                    | Derived::Derived {
+                        served_from_cache: true,
+                        ..
+                    }
                     | Derived::Derived {
                         outcome: Outcome::Fail,
                         ..
@@ -650,10 +661,13 @@ impl Control {
         };
         let own_blocks = match (self.is_ref_backed(), own) {
             (false, _) => false,
-            (true, Some(d)) => blocks(d),
+            (true, Some(d)) => own_blocks(d),
             (true, None) => true, // ref declared but no resolution ⇒ honestly blocked
         };
-        if own_blocks || impls.iter().any(blocks) {
+        if own_blocks
+            || impls.len() != self.implementations.len()
+            || impls.iter().any(|d| !d.is_green_eligible())
+        {
             return ControlStatus::InProgress;
         }
         // Nothing blocks. Green only when an actual Pass exists somewhere.
@@ -676,24 +690,61 @@ impl Control {
         if !self.is_ref_backed() && self.implementations.is_empty() {
             return Derived::Asserted;
         }
-        let mut all: Vec<Derived> = Vec::new();
-        if let Some(d) = own {
-            all.push(d);
+        let own_blocks = |d: &Derived| {
+            matches!(
+                d,
+                Derived::Unresolved { .. }
+                    | Derived::Stale { .. }
+                    | Derived::Asserted
+                    | Derived::Derived {
+                        served_from_cache: true,
+                        ..
+                    }
+                    | Derived::Derived {
+                        outcome: Outcome::Fail,
+                        ..
+                    }
+            )
+        };
+        if self.is_ref_backed() {
+            match own.as_ref() {
+                Some(d) if own_blocks(d) => return d.clone(),
+                None => {
+                    return Derived::Unresolved {
+                        reason: "control ref did not produce a projection".to_string(),
+                    };
+                }
+                _ => {}
+            }
         }
-        all.extend(impls);
+        if impls.len() != self.implementations.len() {
+            return Derived::Unresolved {
+                reason: "one or more implementations did not produce a projection".to_string(),
+            };
+        }
         // Honest worst-case: Unresolved dominates, then Stale, then Fail.
-        if let Some(u) = all.iter().find(|d| matches!(d, Derived::Unresolved { .. })) {
+        if let Some(u) = impls
+            .iter()
+            .find(|d| matches!(d, Derived::Unresolved { .. }))
+        {
             return u.clone();
         }
-        if let Some(s) = all.iter().find(|d| matches!(d, Derived::Stale { .. })) {
+        if let Some(s) = impls.iter().find(|d| matches!(d, Derived::Stale { .. })) {
             return s.clone();
         }
-        if let Some(f) = all.iter().find(|d| matches!(d.outcome(), Outcome::Fail)) {
+        if let Some(f) = impls.iter().find(|d| matches!(d.outcome(), Outcome::Fail)) {
             return f.clone();
         }
-        // All green-eligible or title-only → return the first projection (the
-        // own ref if any, else the first impl).
-        all.into_iter().next().unwrap_or(Derived::Asserted)
+        if let Some(non_green_impl) = impls.iter().find(|d| !d.is_green_eligible()) {
+            return non_green_impl.clone();
+        }
+        if let Some(green_impl) = impls.into_iter().find(Derived::is_green_eligible) {
+            return green_impl;
+        }
+        if let Some(d) = own {
+            return d;
+        }
+        Derived::Asserted
     }
 }
 
@@ -980,11 +1031,20 @@ mod tests {
             }
             other => panic!("malformed url must be Unresolved, got {other:?}"),
         }
-        // well-formed url ⇒ Verified (no network).
-        assert_eq!(
-            verify_evidence(&[url("https://x/y")], absent),
-            EvidenceVerdict::Verified
-        );
+        // well-formed url is still format-only in offline mode ⇒ Unresolved, not
+        // fabricated Verified.
+        match verify_evidence(&[url("https://x/y")], absent) {
+            EvidenceVerdict::Unresolved {
+                kind,
+                value,
+                reason,
+            } => {
+                assert_eq!(kind, EvidenceKind::Url);
+                assert_eq!(value, "https://x/y");
+                assert!(reason.contains("format-only"));
+            }
+            other => panic!("format-only url must be Unresolved, got {other:?}"),
+        }
         // mixed: note + missing file ⇒ Unresolved (first verifying-kind offender).
         match verify_evidence(&[note("n"), file("gone.pdf")], absent) {
             EvidenceVerdict::Unresolved { kind, value, .. } => {
