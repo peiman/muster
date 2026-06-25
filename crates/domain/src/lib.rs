@@ -17,7 +17,7 @@ pub use model::{
     NonconformitySource, NonconformityStatus, Process, ProcessStatus, Revision, Severity, Step,
     has_verifying_evidence, is_well_formed_url, validate_slug, verify_evidence,
 };
-pub use readiness::{ControlsSplit, Readiness, readiness, readiness_with};
+pub use readiness::{ControlsSplit, Readiness, readiness, readiness_with, readiness_with_checks};
 pub use reference::{
     Comparator, Derived, Expectation, Outcome, Ref, Resolution, drift_profile, is_stale,
     value_to_outcome, value_to_outcome_with_expect,

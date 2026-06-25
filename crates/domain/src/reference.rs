@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 /// A typed pointer to an authoritative source (#7 — reference, don't copy).
 /// v1 resolver kinds only (no `url`/network — out of scope).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Ref {
     /// Read a scalar at a dotted anchor in a TOML or JSON file. The PRIMARY glue.
     /// An optional numeric [`Expectation`] turns the resolved number into an
@@ -88,6 +88,7 @@ pub enum Comparator {
 /// (the bare-number honesty hole). The criterion is explicit, so no green is
 /// fabricated (#1). `f64` ⇒ `PartialEq` only (no `Eq`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Expectation {
     pub op: Comparator,
     pub threshold: f64,
@@ -177,7 +178,7 @@ pub fn value_to_outcome_with_expect(value: &str, expect: Option<&Expectation>) -
 /// resolver's output; consumed by the projection below. Cached on the entity (for
 /// `command` refs / display) and re-derived for `file_anchor`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Resolution {
     Resolved {
         value: String,

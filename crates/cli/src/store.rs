@@ -150,7 +150,7 @@ pub fn load(dir: &Path) -> Result<Store, StoreError> {
 /// Serialize one entity to a *temp* file `<sub>/<id>.json.tmp` (byte-identical to
 /// the final content), returning the `(temp, final)` pair to be renamed in the
 /// commit phase. A serialize or write failure here aborts before any live file is
-/// touched (#3 all-or-nothing).
+/// touched (#3 fail-before-live-write).
 fn stage_entity<T: serde::Serialize>(
     dir: &Path,
     sub: &str,
@@ -168,12 +168,13 @@ fn stage_entity<T: serde::Serialize>(
 }
 
 /// Persist every entity to its `<id>.json` (pretty, stable key order via the
-/// struct field order + BTreeMap iteration). The write is **atomic** (#3): every
-/// entity is serialized to a `.json.tmp` first (any serialize/IO error aborts
-/// before a single live file is touched), then the temps are renamed into place,
-/// so a mid-write `ENOSPC`/interruption cannot tear a file or half-write the
-/// store. `load()` ignores non-`.json` files, so a temp is invisible to readers
-/// even between phases. (Per #4 this is temp+rename, not a cross-file transaction.)
+/// struct field order + BTreeMap iteration). This is **per-file atomic** (#3):
+/// every entity is serialized to a `.json.tmp` first (any serialize/IO error
+/// aborts before a single live file is touched), then temps are renamed into
+/// place. A mid-write `ENOSPC`/interruption cannot tear an individual live file,
+/// and `load()` ignores non-`.json` temps, but this is not a cross-file
+/// transaction: a crash during the rename phase can leave a mix of old and new
+/// entity files.
 pub fn save(dir: &Path, store: &Store) -> Result<(), StoreError> {
     // Phase 1: serialize + stage all entities to temp files.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -349,9 +350,9 @@ mod tests {
         assert!(parse_iso_to_epoch("2022-01-01 00:00:00").is_none());
     }
 
-    /// The atomic-save anchor (#3 all-or-nothing, #9 enforced not honor-system):
-    /// a `save` that FAILS mid-write must not tear or half-write an entity that
-    /// already exists on disk. We force a phase-1 staging failure by pre-creating
+    /// The per-file atomic-save anchor (#3, #9 enforced not honor-system): a
+    /// `save` that FAILS during staging must not tear or half-write an entity
+    /// that already exists on disk. We force a phase-1 staging failure by pre-creating
     /// `<id>.json.tmp` as a *directory* (so the temp `std::fs::write` errors), then
     /// attempt to overwrite the live entity with new content. Under temp-then-rename
     /// the live `<id>.json` is never touched (this test is GREEN); under a non-atomic

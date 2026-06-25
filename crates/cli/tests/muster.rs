@@ -448,6 +448,45 @@ fn malformed_url_evidence_is_a_gap_e2e() {
     );
 }
 
+#[test]
+fn format_only_url_evidence_is_not_coverage_e2e() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "url",
+            "https://example.invalid/fake",
+        ],
+    );
+    let r = data(&d, &["readiness"]);
+    assert_eq!(
+        r["control_coverage"]["implemented_with_evidence"], 0,
+        "syntax-only URL evidence must not prove coverage"
+    );
+    assert_ne!(
+        r["verdict"], "READY",
+        "a format-only URL must not make readiness green"
+    );
+    assert!(
+        r["gap_findings"].as_array().unwrap().iter().any(|g| {
+            g["kind"] == "control_evidence_unresolved"
+                && g["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("https://example.invalid/fake")
+        }),
+        "the unverified URL must be named as a gap: {:?}",
+        r["gap_findings"]
+    );
+}
+
 /// b1 invariant preserved — a note-only evidence still gaps with the existing
 /// `control_honor_evidence` finding (unchanged behavior).
 #[test]
@@ -917,6 +956,146 @@ fn sc4_and_sc5_checks_derive_and_cannot_be_forged() {
 }
 
 #[test]
+fn deleted_ref_backed_process_check_blocks_ready() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "set-status", "p1", "active"]);
+    data(&d, &["process", "risk", "add", "p1", "drift"]);
+    data(&d, &["process", "metric", "add", "p1", "coverage"]);
+
+    let evidence = tmp.path().join("evidence.md");
+    std::fs::write(&evidence, "evidence\n").unwrap();
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["process", "link-control", "p1", "c1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            evidence.to_str().unwrap(),
+        ],
+    );
+
+    let src = write_src(&tmp, "check.toml", "[checks.ready]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "process",
+            "check",
+            "add",
+            "p1",
+            "--description",
+            "authoritative readiness check",
+            "--enforcement",
+            "ci",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "checks.ready.status",
+        ],
+    );
+
+    let before = data(&d, &["readiness"]);
+    assert_eq!(before["verdict"], "READY", "fixture must start ready");
+
+    std::fs::remove_file(&src).unwrap();
+    let after = data(&d, &["readiness"]);
+    assert_ne!(
+        after["verdict"], "READY",
+        "a deleted authoritative check ref must not be silently ignored"
+    );
+    assert!(
+        after["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| { g["kind"] == "check_ref_unresolved" && g["subject_id"] == "p1/check-1" }),
+        "the unresolved check ref must be named as a gap: {}",
+        after["gap_findings"]
+    );
+}
+
+#[test]
+fn deleted_ref_backed_check_blocks_ready_for_non_active_process() {
+    // Regression (toolkit silent-failure-hunter): the check-ref gap logic must
+    // run for EVERY in-scope process, not only Active ones. A dangling/stale/
+    // asserted/cache-served authoritative check ref is a readiness fact whatever
+    // the process's lifecycle — `under_review` ("reality diverging") is the most
+    // suspicious state, and it must NOT silently flatten to READY.
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "set-status", "p1", "under_review"]);
+    data(&d, &["process", "risk", "add", "p1", "drift"]);
+    data(&d, &["process", "metric", "add", "p1", "coverage"]);
+
+    let evidence = tmp.path().join("evidence.md");
+    std::fs::write(&evidence, "evidence\n").unwrap();
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["process", "link-control", "p1", "c1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            evidence.to_str().unwrap(),
+        ],
+    );
+
+    let src = write_src(&tmp, "check.toml", "[checks.ready]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "process",
+            "check",
+            "add",
+            "p1",
+            "--description",
+            "authoritative readiness check",
+            "--enforcement",
+            "ci",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "checks.ready.status",
+        ],
+    );
+
+    let before = data(&d, &["readiness"]);
+    assert_eq!(
+        before["verdict"], "READY",
+        "non-active fixture with a resolving check must start ready"
+    );
+
+    std::fs::remove_file(&src).unwrap();
+    let after = data(&d, &["readiness"]);
+    assert_ne!(
+        after["verdict"], "READY",
+        "a deleted authoritative check ref must block READY even for a non-active (under_review) process"
+    );
+    assert!(
+        after["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| { g["kind"] == "check_ref_unresolved" && g["subject_id"] == "p1/check-1" }),
+        "the unresolved check ref must be named as a gap for the non-active process: {}",
+        after["gap_findings"]
+    );
+}
+
+#[test]
 fn sc6_dangling_ref_is_refused_at_store_time_then_unresolved_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);
@@ -1123,6 +1302,66 @@ fn sc10_nm_one_failing_implementation_blocks_green() {
     assert_ne!(
         c["status"], "implemented",
         "one failing impl must block green"
+    );
+}
+
+#[test]
+fn nm_asserted_implementation_blocks_coverage() {
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+    let met = write_src(&tmp, "source.toml", "[s]\nv = \"met\"\n");
+    data(
+        &d,
+        &[
+            "control",
+            "add",
+            "c1",
+            "--title",
+            "Cross-impl",
+            "--ref-file",
+            &met,
+            "--ref-anchor",
+            "s.v",
+        ],
+    );
+
+    let before = data(&d, &["readiness"]);
+    assert_eq!(
+        before["control_coverage"]["implemented_with_evidence"], 1,
+        "the own passing ref should cover the fixture before adding the asserted impl"
+    );
+
+    data(
+        &d,
+        &[
+            "control",
+            "add-implementation",
+            "c1",
+            "--impl-id",
+            "manual",
+            "--ref-note",
+            "trust me",
+        ],
+    );
+
+    let after = data(&d, &["readiness"]);
+    assert_eq!(
+        after["control_coverage"]["implemented_with_evidence"], 0,
+        "an asserted implementation cannot be covered by another passing projection"
+    );
+    assert_ne!(
+        after["verdict"], "READY",
+        "an asserted required implementation must block READY"
+    );
+    assert!(
+        after["control_coverage"]["gaps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| g["id"] == "c1"),
+        "the N:M control must be named as a coverage gap: {}",
+        after["control_coverage"]["gaps"]
     );
 }
 
