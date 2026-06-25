@@ -1022,6 +1022,80 @@ fn deleted_ref_backed_process_check_blocks_ready() {
 }
 
 #[test]
+fn deleted_ref_backed_check_blocks_ready_for_non_active_process() {
+    // Regression (toolkit silent-failure-hunter): the check-ref gap logic must
+    // run for EVERY in-scope process, not only Active ones. A dangling/stale/
+    // asserted/cache-served authoritative check ref is a readiness fact whatever
+    // the process's lifecycle — `under_review` ("reality diverging") is the most
+    // suspicious state, and it must NOT silently flatten to READY.
+    let tmp = TempDir::new().unwrap();
+    let d = data_dir(&tmp);
+    init(&d);
+
+    data(&d, &["process", "add", "p1", "--name", "P1"]);
+    data(&d, &["process", "set-status", "p1", "under_review"]);
+    data(&d, &["process", "risk", "add", "p1", "drift"]);
+    data(&d, &["process", "metric", "add", "p1", "coverage"]);
+
+    let evidence = tmp.path().join("evidence.md");
+    std::fs::write(&evidence, "evidence\n").unwrap();
+    data(&d, &["control", "add", "c1", "--title", "C1"]);
+    data(&d, &["process", "link-control", "p1", "c1"]);
+    data(&d, &["control", "set-status", "c1", "implemented"]);
+    data(
+        &d,
+        &[
+            "control",
+            "attach-evidence",
+            "c1",
+            "file",
+            evidence.to_str().unwrap(),
+        ],
+    );
+
+    let src = write_src(&tmp, "check.toml", "[checks.ready]\nstatus = \"met\"\n");
+    data(
+        &d,
+        &[
+            "process",
+            "check",
+            "add",
+            "p1",
+            "--description",
+            "authoritative readiness check",
+            "--enforcement",
+            "ci",
+            "--ref-file",
+            &src,
+            "--ref-anchor",
+            "checks.ready.status",
+        ],
+    );
+
+    let before = data(&d, &["readiness"]);
+    assert_eq!(
+        before["verdict"], "READY",
+        "non-active fixture with a resolving check must start ready"
+    );
+
+    std::fs::remove_file(&src).unwrap();
+    let after = data(&d, &["readiness"]);
+    assert_ne!(
+        after["verdict"], "READY",
+        "a deleted authoritative check ref must block READY even for a non-active (under_review) process"
+    );
+    assert!(
+        after["gap_findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|g| { g["kind"] == "check_ref_unresolved" && g["subject_id"] == "p1/check-1" }),
+        "the unresolved check ref must be named as a gap for the non-active process: {}",
+        after["gap_findings"]
+    );
+}
+
+#[test]
 fn sc6_dangling_ref_is_refused_at_store_time_then_unresolved_is_a_gap() {
     let tmp = TempDir::new().unwrap();
     let d = data_dir(&tmp);

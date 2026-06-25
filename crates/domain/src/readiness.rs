@@ -749,6 +749,27 @@ fn gap_findings(
             });
         }
     }
+    // Check refs gate readiness for EVERY in-scope process, regardless of
+    // lifecycle status. A dangling / stale / asserted / cache-served
+    // authoritative check ref is a readiness fact whether the process is
+    // active, proposed, under_review, or retired — it must NOT be silently
+    // ignored for non-active processes (toolkit silent-failure-hunter: the
+    // gap logic was previously trapped inside the Active-only loop below).
+    for pid in in_scope {
+        let p = match store.processes.get(pid) {
+            Some(p) => p,
+            None => continue,
+        };
+        for check in &p.checks {
+            if let Some(gap) = check_ref_gap(
+                pid,
+                check,
+                inputs.check_index.get(&check_key(pid, &check.id)),
+            ) {
+                out.push(gap);
+            }
+        }
+    }
     // Active processes: missing risks / metrics / controls (guide, don't gate).
     for pid in in_scope {
         let p = match store.processes.get(pid) {
@@ -778,15 +799,6 @@ fn gap_findings(
                 subject_id: pid.clone(),
                 message: format!("active process '{pid}' has no controls — link: muster process link-control {pid} <control-id>"),
             });
-        }
-        for check in &p.checks {
-            if let Some(gap) = check_ref_gap(
-                pid,
-                check,
-                inputs.check_index.get(&check_key(pid, &check.id)),
-            ) {
-                out.push(gap);
-            }
         }
     }
     // Controls implemented but with no — only honor-level — or non-resolving
